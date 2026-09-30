@@ -118,6 +118,11 @@ function NoiseFill.fill(self: any, chunk: any)
 		Aquifer.setSkipY(aquifer, maxPrelim)
 	end
 	local skipY = (aquifer :: any).skipY
+	local brute = self.bruteForce == true -- test hook: evaluate every voxel, no shortcuts
+	if brute then
+		skipY = math.huge
+		;(aquifer :: any).skipY = math.huge
+	end
 
 	for i = 1, 256 do
 		topY[i] = MIN_Y - 1
@@ -138,6 +143,9 @@ function NoiseFill.fill(self: any, chunk: any)
 				if y1 >= -60 and y0 < 51 then
 					local tl, th = Compiler.cellInterval(sampler, toggleId, cx, cz, cy)
 					veinPossible = max(abs(tl), abs(th)) >= 0.39
+				end
+				if brute then
+					lo, hi, veinPossible = -math.huge, math.huge, true
 				end
 
 				if lo > 0 and not veinPossible then

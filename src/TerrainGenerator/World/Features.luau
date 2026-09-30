@@ -60,7 +60,25 @@ function Features.new(gen: any, options: Options?)
 		oreTiers = o.oreTiers or { coal = 1, copper = 2, iron = 2, redstone = 3, lapis = 3, gold = 4, diamond = 5, emerald = 5 },
 		factories = {} :: { [string]: any },
 		setCache = {} :: { [number]: { { [string]: boolean } } },
+		universal = {} :: { [string]: boolean },
 	}, Features)
+	-- features listed by every biome at their step behave identically everywhere: skip their biome checks
+	local registry = gen.registry
+	for step = 1, 11 do
+		local counts: { [string]: number } = {}
+		local total = 0
+		for id = 1, #registry.names do
+			total += 1
+			for _, n in registry.data[id].features[step] or {} do
+				counts[n] = (counts[n] or 0) + 1
+			end
+		end
+		for n, c in counts do
+			if c == total then
+				self.universal[n .. "@" .. step] = true
+			end
+		end
+	end
 	return self
 end
 
@@ -307,12 +325,17 @@ local function placeOre(env: Env, p: Pos, prog: any, collect: boolean)
 	local width = 2 * (ceil(f1) + i)
 	local height = 2 * (2 + i)
 
-	-- vanilla: only place when some column's ocean floor reaches the vein's bottom
+	-- Blocks are only ever written inside this chunk, and only into stone, which lies at or below the ocean floor:
+	-- if no overlapped column of this chunk reaches up to the vein's bottom, nothing can be placed.
+	local overlapX0, overlapX1 = max(minX, env.minX), min(minX + width, env.minX + 15)
+	local overlapZ0, overlapZ1 = max(minZ, env.minZ), min(minZ + width, env.minZ + 15)
+	if overlapX0 > overlapX1 or overlapZ0 > overlapZ1 or minY > env.chunk.maxFloor + 1 then
+		return
+	end
 	local reach = false
-	for cx = minX, minX + width do
-		for cz = minZ, minZ + width do
-			local h = heightAt(env, "OCEAN_FLOOR_WG", cx, cz)
-			if h == nil or minY <= h then
+	for cx = overlapX0, overlapX1 do
+		for cz = overlapZ0, overlapZ1 do
+			if minY <= heightAt(env, "OCEAN_FLOOR_WG", cx, cz) :: number then
 				reach = true
 				break
 			end
@@ -683,6 +706,13 @@ end
 -- ------------------------------------------------------------------ driver
 function Features.generate(self: any, chunk: any)
 	chunk.collectables = chunk.collectables or {}
+	local maxFloor = MIN_Y
+	for i = 1, 256 do
+		if chunk.floorY[i] > maxFloor then
+			maxFloor = chunk.floorY[i]
+		end
+	end
+	chunk.maxFloor = maxFloor
 	local gen = self.gen
 	local registry = gen.registry
 	local cx, cz = chunk.cx, chunk.cz
@@ -738,12 +768,16 @@ function Features.generate(self: any, chunk: any)
 						env.random = factory:at(ncx, step, ncz)
 						local origin: Pos = { ncx * 16, MIN_Y, ncz * 16 }
 						local positions = applyModifiers(env, placed.placement, origin, scale)
+						local universal = self.universal[name .. "@" .. step]
 						for _, p in positions do
 							-- the biome modifier is last in every list: check membership at the placement position
-							local id = registry.base[gen.biomes:getBiome(p[1], p[2], p[3])]
-							local set = featureSet(self, id)[step]
-							if set[name] then
+							if universal then
 								runProgram(env, prog, p)
+							else
+								local id = registry.base[gen.biomes:getBiome(p[1], p[2], p[3])]
+								if featureSet(self, id)[step][name] then
+									runProgram(env, prog, p)
+								end
 							end
 						end
 					end

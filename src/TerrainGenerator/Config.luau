@@ -28,6 +28,7 @@ export type Config = {
 		MaxChunksInFlight: number,
 		PlayerGraceSeconds: number,
 		KeepInitialArea: boolean,
+		WriteBudgetMs: number,
 	},
 
 	Workers: {
@@ -81,6 +82,7 @@ local Config: Config = {
 		MaxChunksInFlight = 8, -- concurrent chunk jobs (should be >= Workers.Count)
 		PlayerGraceSeconds = 30, -- a player without a character (respawning) keeps its window this long
 		KeepInitialArea = false, -- true: never unload the initial Width x Length area around (0, 0)
+		WriteBudgetMs = 4, -- terrain writes yield to the next frame after this many ms (smooths server hitches)
 	},
 
 	Workers = {

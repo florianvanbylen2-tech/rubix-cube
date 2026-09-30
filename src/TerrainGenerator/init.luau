@@ -76,6 +76,7 @@ local function writerConfig(): any
 		colorParts = Config.Collectables.ColorParts,
 		applyColors = Config.ApplyMaterialColors,
 		decoration = Config.Decoration,
+		writeBudgetMs = Config.Streaming.WriteBudgetMs,
 	}
 end
 
@@ -242,12 +243,7 @@ local function releaseSpawn()
 end
 
 -- ---------------------------------------------------------------------------------------- start / stop
-function TerrainGenerator.Start()
-	assert(RunService:IsServer(), "TerrainGenerator.Start() must run on the server")
-	if started then
-		return
-	end
-	started = true
+local function startInner()
 	local cfg = Config
 
 	local rx = math.max(1, math.ceil(cfg.Width / CHUNK / 2))
@@ -446,6 +442,31 @@ function TerrainGenerator.Start()
 			end
 		end
 	end)
+end
+
+-- Generates the initial area around (0, 0), then keeps a Width x Length window loaded around every player.
+-- Yields until the workers are ready (a few seconds); terrain then streams in the background.
+function TerrainGenerator.Start()
+	assert(RunService:IsServer(), "TerrainGenerator.Start() must run on the server")
+	if started then
+		return
+	end
+	started = true
+	local ok, err = pcall(startInner)
+	if not ok then
+		-- never leave players stuck without characters if start-up failed
+		started = false
+		Players.CharacterAutoLoads = true
+		if heartbeat then
+			heartbeat:Disconnect()
+			heartbeat = nil
+		end
+		if container then
+			container:Destroy()
+			container = nil
+		end
+		error(err, 0)
+	end
 end
 
 function TerrainGenerator.Stop()

@@ -6,7 +6,7 @@ local Settings = require(TG.Data.Settings)
 local H, MINY = Settings.height, Settings.minY
 
 local BASE = 64 -- bedrock level (studs) other than 0 to test the offset handling
-local cfg = { bedrockLevel = BASE, folderName = "GeneratedCollectables", collectables = true, partSize = Vector3.new(4, 4, 4), colorParts = true, applyColors = true }
+local cfg = { bedrockLevel = BASE, folderName = "GeneratedCollectables", collectables = true, partSize = Vector3.new(4, 4, 4), colorParts = true, applyColors = true, writeBudgetMs = math.huge }
 ChunkWriter.applyGlobals(cfg)
 local writer = ChunkWriter.new(cfg)
 local gen = ChunkGenerator.new(12345)

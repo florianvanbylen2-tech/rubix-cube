@@ -14,6 +14,7 @@ local HEIGHT = Settings.height
 local MIN_Y = Settings.minY
 local SECTION = 16
 local SECTIONS = HEIGHT // SECTION
+local MAX_RUN = 8 -- sections per WriteVoxels call (bounds the time of one engine call)
 local VOXEL = 4
 local CHUNK_STUDS = 16 * VOXEL
 local AIR = Blocks.AIR
@@ -26,6 +27,7 @@ export type WriterConfig = {
 	colorParts: boolean,
 	applyColors: boolean,
 	decoration: boolean?,
+	writeBudgetMs: number?, -- yield (task.wait) between engine calls once a write has used this much time
 }
 
 -- biomes whose grass is a darker green (Minecraft tints grass per biome; Terrain only has two grass materials)
@@ -280,8 +282,18 @@ function ChunkWriter.write(self: any, chunk: any)
 		kind[s + 1] = sectionUniform(blocks, occ, s)
 	end
 
+	local budget = (self.config.writeBudgetMs or math.huge) / 1000
+	local sliceStart = os.clock()
+	local function maybeYield()
+		if os.clock() - sliceStart > budget then
+			task.wait()
+			sliceStart = os.clock()
+		end
+	end
+
 	local s = 0
 	while s < SECTIONS do
+		maybeYield()
 		local k = kind[s + 1]
 		if k == AIR then
 			s += 1
@@ -298,7 +310,7 @@ function ChunkWriter.write(self: any, chunk: any)
 			s = e + 1
 		else
 			local e = s
-			while e + 1 < SECTIONS and kind[e + 2] == -1 do
+			while e + 1 < SECTIONS and kind[e + 2] == -1 and e - s + 1 < MAX_RUN do
 				e += 1
 			end
 			writeRun(self, chunk, s, e - s + 1)
