@@ -1,0 +1,4 @@
+tools/.cache/
+build/
+*.rbxl.lock
+.DS_Store

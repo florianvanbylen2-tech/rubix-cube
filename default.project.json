@@ -1,0 +1,15 @@
+{
+  "name": "MinecraftTerrain",
+  "tree": {
+    "$className": "DataModel",
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "TerrainGenerator": {
+        "$path": "src/TerrainGenerator"
+      },
+      "TerrainGeneratorRunner": {
+        "$path": "src/TerrainGeneratorRunner.server.luau"
+      }
+    }
+  }
+}
