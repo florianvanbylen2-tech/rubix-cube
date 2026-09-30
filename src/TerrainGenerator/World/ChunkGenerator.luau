@@ -91,9 +91,30 @@ function ChunkGenerator.generateCarved(self: any, cx: number, cz: number): Chunk
 	return chunk
 end
 
--- The full pipeline: noise -> surface -> carvers -> features
-function ChunkGenerator.generate(self: any, cx: number, cz: number): Chunk
-	local chunk = ChunkGenerator.generateCarved(self, cx, cz)
+-- The full pipeline: noise -> surface -> carvers -> features.
+-- yieldFn (optional) is called between stages and between noise-fill slabs so a caller running in a Roblox
+-- Actor can hand the frame back instead of holding it for the whole ~100-300 ms a chunk takes. The generator
+-- is not re-entrant: never run two generate() calls on one generator at the same time.
+function ChunkGenerator.generate(self: any, cx: number, cz: number, yieldFn: (() -> ())?): Chunk
+	self.fill.yieldFn = yieldFn
+	local chunk = ChunkGenerator.generateNoise(self, cx, cz)
+	self.fill.yieldFn = nil
+	if yieldFn then
+		yieldFn()
+	end
+	self.surface:build(chunk)
+	if yieldFn then
+		yieldFn()
+	end
+	Carvers.carve(self, chunk)
+	if chunk.occ and chunk.carvedList then
+		Carvers.smoothCarved(chunk, chunk.carvedList)
+	end
+	chunk.carvedList = nil
+	Carvers.recomputeHeightmaps(chunk)
+	if yieldFn then
+		yieldFn()
+	end
 	Features.generate(self.features, chunk)
 	chunk.aquifer = nil
 	return chunk

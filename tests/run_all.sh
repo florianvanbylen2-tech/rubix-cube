@@ -22,6 +22,8 @@ echo "chunk manager: multiplayer streaming invariants (incl. randomised fuzz)"
 run tests/manager.luau | tail -1
 echo "noise fill shortcuts == brute force (slow)"
 run tests/shortcuts.luau --codegen | tail -1
+echo "time-sliced generation == uninterrupted generation"
+run tests/sliced.luau --codegen | tail -1
 echo "chunk writer against a mocked Terrain"
 run tests/writer.luau --codegen | tail -1
 echo "Start() end-to-end against mocked Roblox services"

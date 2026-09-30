@@ -25,7 +25,7 @@ Then press Play. Recommended: enable `Workspace.StreamingEnabled` (the terrain i
 -- optional, e.g. in your own Script before/instead of TerrainGeneratorRunner
 local TerrainGenerator = require(game.ServerScriptService.TerrainGenerator)
 TerrainGenerator.Config.Seed = "MyWorldName"      -- number or string, like Minecraft's level-seed
-TerrainGenerator.Config.Width, TerrainGenerator.Config.Length = 2048, 2048
+TerrainGenerator.Config.Width, TerrainGenerator.Config.Length = 1024, 1024
 TerrainGenerator.Start()
 ```
 
@@ -59,24 +59,25 @@ height ranges: emerald only in mountains, diamonds deep, coal common up high…)
 | Key | Default | Meaning |
 |---|---|---|
 | `Seed` | `12345` | number, numeric string (64-bit), or any string (Java `hashCode`, as Minecraft does) |
-| `Width`, `Length` | `2048` | studs of loaded terrain around every player, and of the start-up area around (0,0) |
+| `Width`, `Length` | `1024` | studs of loaded terrain around every player, and of the start-up area around (0,0) |
 | `BedrockLevel` | `0` | Workspace Y of the world floor (Minecraft y = −64), multiple of 4 |
 | `SmoothTerrain` | `true` | sub-voxel occupancy from the density gradient (smooth hills) instead of 4-stud cubes |
 | `ApplyMaterialColors` | `true` | recolour Terrain materials to resemble Minecraft blocks |
 | `ClearBeforeGenerating` | `true` | `Terrain:Clear()` at start |
 | `Streaming.UnloadMargin` | `2` | chunks kept around each window before unloading (prevents flicker) |
-| `Streaming.MaxChunksInFlight` | `8` | concurrent chunk jobs |
+| `Streaming.MaxChunksInFlight` | `4` | concurrent chunk jobs (capped at `Workers.Count`) |
 | `Streaming.PlayerGraceSeconds` | `30` | a player without a character keeps their window this long |
 | `Streaming.KeepInitialArea` | `false` | never unload the start-up area |
-| `Streaming.WriteBudgetMs` | `4` | terrain writes yield to the next frame after this many ms |
-| `Workers.Enabled` / `Count` | `true` / `6` | Parallel Luau actors. Disabled = single thread (causes server hitches) |
-| `Collectables.TreeDensity` | `1.0` | 1 = Minecraft's density. **Lower this for fewer trees** (0.5 = half) |
-| `Collectables.OreDensity` | `0.5` | thins out ore parts; 1 = every vein |
+| `Streaming.WriteBudgetMs` | `3` | terrain writes yield to the next frame after this many ms |
+| `Workers.Enabled` / `Count` | `true` / `4` | Parallel Luau actors. Disabled = single thread (causes server hitches) |
+| `Workers.SliceMs` | `6` | a worker hands the frame back after this many ms of generation (no frame hitches) |
+| `Collectables.TreeDensity` | `0.5` | 1 = Minecraft's density. **Lower this for fewer trees** (0.5 = half) |
+| `Collectables.OreDensity` | `0.25` | thins out ore parts; 1 = every vein |
 | `Collectables.OreTiers`, `PartSize`, `ColorParts`, `FolderName`, `Enabled` | | see file |
 | `Spawn.AutoSpawn` | `true` | hold characters until the origin area exists, then spawn them on land |
 
 The old `SeaLevel`, `MaxHeight`, `HeightVariation`, `NoiseScale`, `Octaves`, … keys no longer exist: terrain shape now
-comes from Minecraft's noise router. `Width`/`Length` at 2048 studs is only 512 blocks: Minecraft biomes are hundreds
+comes from Minecraft's noise router. `Width`/`Length` at 1024 studs is only 256 blocks: Minecraft biomes are hundreds
 of blocks wide, so a start-up area that size shows one or two biomes; more appear as players explore.
 
 ## API
@@ -175,8 +176,14 @@ Materials: Roblox Terrain has ~20 solid materials and no per-voxel colour, so se
 Measured single-threaded in a plain Luau VM with native codegen (`--!native`, as the modules declare), per chunk:
 noise fill ≈ 55 ms, surface ≈ 25 ms, carvers ≈ 7 ms, features ≈ 13 ms → **≈ 100 ms** (≈ 250 ms without native
 codegen). Writing a chunk costs ≈ 4 ms of Lua plus the engine's own `WriteVoxels`/`FillBlock` time (not measured here).
-The default 2048×2048 start-up area is 1024 chunks ≈ 100 s of CPU, spread over the workers. Ways to go faster: fewer
+The default 1024×1024 start-up area is 256 chunks ≈ 25 s of CPU, spread over the workers. Ways to go faster: fewer
 `Width/Length`, more `Workers.Count`, lower `OreDensity`. Roblox-side numbers may differ from these.
+
+Keeping the game smooth (server and client): generation is time-sliced (`Workers.SliceMs`) so no parallel task holds a
+frame for a whole chunk; terrain writes are budgeted per frame (`Streaming.WriteBudgetMs`), reuse their voxel tables and
+create parts off-tree; at most one job runs per worker; `Config.Decoration = false` turns off Terrain grass blades
+(a large client FPS saver); tree/ore parts are thinned by default. In Studio the server and the client share one CPU,
+so `Workers.Count` above your core count − 2 will make Studio itself feel laggy.
 
 Memory: every worker Actor holds its own copy of the generator — about 12 MB after initialisation (code, vanilla data,
 noise tables) and about 18 MB once its caches are warm (`collectgarbage("count")` after 60 chunks). With the default

@@ -14,7 +14,7 @@ local HEIGHT = Settings.height
 local MIN_Y = Settings.minY
 local SECTION = 16
 local SECTIONS = HEIGHT // SECTION
-local MAX_RUN = 8 -- sections per WriteVoxels call (bounds the time of one engine call)
+local MAX_RUN = 4 -- sections per WriteVoxels call (bounds the time of one engine call and of building its tables)
 local VOXEL = 4
 local CHUNK_STUDS = 16 * VOXEL
 local AIR = Blocks.AIR
@@ -74,6 +74,7 @@ function ChunkWriter.new(config: WriterConfig)
 		root = root,
 		config = config,
 		materialOf = materialOf,
+		pool = {} :: { [number]: any }, -- reusable WriteVoxels tables, by run length in sections
 		grass = Enum.Material.Grass,
 		leafy = Enum.Material.LeafyGrass,
 		grassId = Blocks.ids.grass_block,
@@ -153,16 +154,24 @@ local function writeRun(self: any, chunk: any, s0: number, n: number)
 	local ny = n * SECTION
 	local yStart = s0 * SECTION
 
-	local mats: { any } = table.create(16)
-	local occs: { any } = table.create(16)
-	for x = 1, 16 do
-		local mx, ox = table.create(ny), table.create(ny)
-		for y = 1, ny do
-			mx[y] = table.create(16, airMat)
-			ox[y] = table.create(16, 0)
+	-- The 3-D material / occupancy tables WriteVoxels wants are large (16 x ny x 16 each); reuse them between calls
+	-- instead of allocating ~4000 small tables per run. Every entry is overwritten below, so stale data is harmless.
+	local pool = self.pool[n]
+	if pool == nil then
+		local pm: { any } = table.create(16)
+		local po: { any } = table.create(16)
+		for x = 1, 16 do
+			local mx, ox = table.create(ny), table.create(ny)
+			for y = 1, ny do
+				mx[y] = table.create(16, airMat)
+				ox[y] = table.create(16, 0)
+			end
+			pm[x], po[x] = mx, ox
 		end
-		mats[x], occs[x] = mx, ox
+		pool = { mats = pm, occs = po }
+		self.pool[n] = pool
 	end
+	local mats, occs = pool.mats, pool.occs
 
 	for x = 0, 15 do
 		local mx, ox = mats[x + 1], occs[x + 1]
@@ -197,6 +206,9 @@ local function writeRun(self: any, chunk: any, s0: number, n: number)
 						end
 						mx[y + 1][z + 1] = isSolidId(nb) and ((nb == grassId) and grassMat or materialOf[nb]) or self.rock
 						ox[y + 1][z + 1] = o / 255
+					else
+						mx[y + 1][z + 1] = airMat
+						ox[y + 1][z + 1] = 0
 					end
 				else
 					local mat = materialOf[b]
@@ -227,7 +239,7 @@ local function partColor(c: any): Color3
 	return Color3.fromRGB(rgb[1], rgb[2], rgb[3])
 end
 
-local function makeCollectables(self: any, chunk: any)
+local function makeCollectables(self: any, chunk: any, maybeYield: () -> ())
 	local list = chunk.collectables
 	if not self.config.collectables or #list == 0 or not self.root then
 		return
@@ -265,6 +277,7 @@ local function makeCollectables(self: any, chunk: any)
 			part.Color = partColor(c)
 		end
 		part.Parent = folder
+		maybeYield() -- parts are built off-tree, so yielding here never shows a half-built chunk
 	end
 	folder.Parent = self.root
 end
@@ -317,7 +330,7 @@ function ChunkWriter.write(self: any, chunk: any)
 			s = e + 1
 		end
 	end
-	makeCollectables(self, chunk)
+	makeCollectables(self, chunk, maybeYield)
 end
 
 -- Removes a chunk's terrain column and collectables. Main thread.

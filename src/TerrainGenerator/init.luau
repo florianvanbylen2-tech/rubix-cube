@@ -282,7 +282,8 @@ local function startInner()
 		radius = rx,
 		radiusZ = rz,
 		margin = cfg.Streaming.UnloadMargin,
-		maxInFlight = cfg.Workers.Enabled and cfg.Streaming.MaxChunksInFlight or 1,
+		-- at most one job per actor: an actor's generator is not re-entrant
+		maxInFlight = cfg.Workers.Enabled and math.min(cfg.Streaming.MaxChunksInFlight, math.max(1, cfg.Workers.Count)) or 1,
 		playerGrace = cfg.Streaming.PlayerGraceSeconds,
 	}, {
 		dispatch = function(cx: number, cz: number, jobId: number)
@@ -368,7 +369,7 @@ local function startInner()
 			task.wait(0.05)
 		end
 		assert(bound == count, "TerrainGenerator: workers failed to start (is the module inside ServerScriptService?)")
-		local init = { seed = cfg.Seed, generator = generatorOptions(), writer = writerConfig() }
+		local init = { seed = cfg.Seed, generator = generatorOptions(), writer = writerConfig(), sliceMs = cfg.Workers.SliceMs }
 		for _, actor in actors do
 			actor:SendMessage("Init", init)
 		end

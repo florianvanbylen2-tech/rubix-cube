@@ -34,6 +34,7 @@ export type Config = {
 	Workers: {
 		Enabled: boolean,
 		Count: number,
+		SliceMs: number,
 	},
 
 	Collectables: {
@@ -61,8 +62,8 @@ local Config: Config = {
 
 	-- Size in studs of the terrain window kept loaded around every player, and of the area generated around
 	-- (0, 0) at start-up. Rounded up to whole 64-stud chunks. Smaller = faster start and less memory.
-	Width = 2048,
-	Length = 2048,
+	Width = 1024,
+	Length = 1024,
 
 	-- Workspace Y (studs) of the bottom of the world; rounded down to a multiple of 4.
 	BedrockLevel = 0,
@@ -79,24 +80,25 @@ local Config: Config = {
 	Streaming = {
 		UpdateInterval = 0.25, -- seconds between player position checks
 		UnloadMargin = 2, -- extra chunks kept around each window before unloading (prevents flicker)
-		MaxChunksInFlight = 8, -- concurrent chunk jobs (should be >= Workers.Count)
+		MaxChunksInFlight = 4, -- concurrent chunk jobs (capped at Workers.Count: one job per worker)
 		PlayerGraceSeconds = 30, -- a player without a character (respawning) keeps its window this long
 		KeepInitialArea = false, -- true: never unload the initial Width x Length area around (0, 0)
-		WriteBudgetMs = 4, -- terrain writes yield to the next frame after this many ms (smooths server hitches)
+		WriteBudgetMs = 3, -- terrain writes yield to the next frame after this many ms (smooths server hitches)
 	},
 
 	Workers = {
 		-- Parallel Luau (Actors). Strongly recommended: one chunk costs ~0.1-0.4 s of CPU.
 		-- With Enabled = false chunks are generated on the main thread, one at a time (causes frame hitches).
 		Enabled = true,
-		Count = 6,
+		Count = 4, -- more = faster start-up but more CPU/memory (~18 MB each); Studio also renders on the same CPU
+		SliceMs = 6, -- a worker hands the frame back after this many ms of generation, so chunks never hitch a frame
 	},
 
 	Collectables = {
 		Enabled = true,
 		FolderName = "GeneratedCollectables", -- created in Workspace
-		TreeDensity = 1.0, -- 1 = Minecraft's tree density; 0.5 = half as many trees
-		OreDensity = 0.5, -- 1 = every Minecraft ore vein gets a part; lower thins them out
+		TreeDensity = 0.5, -- 1 = Minecraft's tree density; 0.5 = half as many trees
+		OreDensity = 0.25, -- 1 = every Minecraft ore vein gets a part; lower thins them out
 		-- Ore_N: N is the tier, 1 = most common ... 5 = rarest
 		OreTiers = { coal = 1, copper = 2, iron = 2, redstone = 3, lapis = 3, gold = 4, diamond = 5, emerald = 5 },
 		PartSize = Vector3.new(4, 4, 4),
@@ -108,7 +110,7 @@ local Config: Config = {
 		ReadyRadiusChunks = 4, -- chunks around (0,0) that must be loaded before spawning
 	},
 
-	Decoration = nil, -- true/false sets Terrain.Decoration (grass blades); nil leaves it unchanged
+	Decoration = false, -- false turns off Terrain grass blades (big client FPS win); true = on; nil = leave unchanged
 }
 
 return Config

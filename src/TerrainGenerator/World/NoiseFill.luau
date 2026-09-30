@@ -99,8 +99,13 @@ function NoiseFill.fill(self: any, chunk: any)
 	local veins = self.veins
 	local veinOres = chunk.veinOres
 
+	local yieldFn = self.yieldFn -- optional: lets a caller time-slice the fill (see ChunkGenerator.generate)
+
 	Compiler.setChunk(sampler, minX, minZ)
 	Compiler.fillLattices(sampler, self.interps)
+	if yieldFn then
+		yieldFn()
+	end
 
 	-- highest preliminary surface within reach of any aquifer centre that can influence this chunk
 	local maxPrelim = -math.huge
@@ -134,6 +139,9 @@ function NoiseFill.fill(self: any, chunk: any)
 
 	for cx = 0, CELLS_XZ - 1 do
 		for cz = 0, CELLS_XZ - 1 do
+			if yieldFn and (cx > 0 or cz > 0) then
+				yieldFn() -- 16 cell columns of ~3 ms each, so a slice can end close to its budget
+			end
 			local x0, z0 = minX + cx * CELL_W, minZ + cz * CELL_W
 			for cy = CELLS_Y - 1, 0, -1 do
 				local y0 = MIN_Y + cy * CELL_H
