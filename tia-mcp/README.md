@@ -6,7 +6,7 @@ Waarom: Openness vereist .NET Framework 4.8; de MCP-SDK daarop draaien geeft afh
 
 **Status:** alle tools staan erin, maar de C#-bridge is **nog niet gecompileerd of getest tegen een echte TIA** (de MCP-laag is wel getest met een nepbridge: `python tests/test_server.py`; de FBD-generator is los doorgerekend). Verwacht compileerfouten op API-namen en importfouten op de XML: meld ze, dan pas ik ze aan. Download naar PLC/PLCSIM bestaat niet.
 
-Tools: `get_project_info`, `list_blocks`, `read_block`, `list_tag_tables`, `read_tag_table`, `list_types`, `read_type`, `create_tag_table`, `upsert_tags`, `create_udt`, `create_global_db`, `create_instance_db`, `import_block_xml`, `compile_plc`, `get_fbd_template`, `build_fbd_block`, `append_networks`. LAD-formaat: `docs/simaticml-fbd.md`.
+Tools: `get_project_info`, `list_blocks`, `read_block`, `list_tag_tables`, `read_tag_table`, `list_types`, `read_type`, `create_tag_table`, `upsert_tags`, `create_udt`, `create_global_db`, `create_instance_db`, `import_block_xml`, `compile_plc`, `get_fbd_template`, `build_fbd_block`, `append_networks`. FBD-formaat: `docs/simaticml-fbd.md`.
 
 ## Vereisten
 - Windows, TIA Portal V19 met een project open, Python 3.10+, .NET SDK (voor `dotnet build`).
