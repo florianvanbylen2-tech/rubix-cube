@@ -69,11 +69,13 @@ height ranges: emerald only in mountains, diamonds deep, coal common up high…)
 | `Streaming.PlayerGraceSeconds` | `30` | a player without a character keeps their window this long |
 | `Streaming.KeepInitialArea` | `false` | never unload the start-up area |
 | `Streaming.WriteBudgetMs` | `3` | terrain writes yield to the next frame after this many ms |
+| `Streaming.AdaptiveLoad` / `TargetFrameMs` | `true` / `25` | after spawn, fewer concurrent chunk jobs while the server frame takes longer than this |
 | `Workers.Enabled` / `Count` | `true` / `4` | Parallel Luau actors. Disabled = single thread (causes server hitches) |
 | `Workers.SliceMs` | `6` | a worker hands the frame back after this many ms of generation (no frame hitches) |
 | `Collectables.TreeDensity` | `0.5` | 1 = Minecraft's density. **Lower this for fewer trees** (0.5 = half) |
 | `Collectables.OreDensity` | `0.25` | thins out ore parts; 1 = every vein |
 | `Collectables.OreTiers`, `PartSize`, `ColorParts`, `FolderName`, `Enabled` | | see file |
+| `Structures.Enabled` / `FolderName` | `true` / `"GeneratedStructures"` | custom structures, see [Structures](#structures) |
 | `Spawn.AutoSpawn` | `true` | hold characters until the origin area exists, then spawn them on land |
 
 The old `SeaLevel`, `MaxHeight`, `HeightVariation`, `NoiseScale`, `Octaves`, … keys no longer exist: terrain shape now
@@ -97,6 +99,7 @@ TerrainGenerator.WorldToBlock(Vector3) / BlockToWorld(bx, by, bz) / WorldToChunk
 TerrainGenerator.IsChunkLoaded(cx, cz)
 TerrainGenerator.GetStats()                    --> { loaded, queued, inflight, sources }
 TerrainGenerator.RegisterBiome(definition)     -- custom biome, before Start()
+TerrainGenerator.RegisterStructure(definition) -- custom structure, before Start()
 
 -- signals
 TerrainGenerator.ChunkLoaded / ChunkUnloaded   (chunkX, chunkZ)
@@ -126,6 +129,35 @@ TerrainGenerator.RegisterBiome({
 A custom biome overlays the vanilla map wherever its climate ranges *and* region noise match (highest `priority`
 first). `GetClimateAt` shows the values at any spot, handy for tuning ranges. Examples:
 `src/TerrainGenerator/Examples/MagicalBiomes.luau`. Blocks usable in `surface` are listed in `World/Blocks.luau`.
+
+### Structures
+
+Vanilla structures (villages, mineshafts, …) are not generated, but you can add your own with
+`TerrainGenerator.RegisterStructure({...})` (before `Start()`). A structure is a placement rule plus a `Model` or a
+`Build` function:
+
+```lua
+TerrainGenerator.RegisterStructure({
+    Name = "Watchtower",
+    Spacing = 20, Separation = 8, Chance = 0.8,      -- Minecraft's random_spread: one per 20x20-chunk cell, >= 8 chunks apart
+    Biomes = { "plains", "forest", "taiga" },        -- biome names (custom biome ids work too); omit = anywhere
+    Placement = "Land",                              -- "Land" | "Water" (on the sea floor) | "Any"
+    MaxSlope = 3,                                    -- reject spots whose ground varies more than this (blocks)
+    Model = game.ServerStorage.Watchtower,           -- cloned onto the ground (bottom of its bounding box), and/or:
+    Build = function(ctx)                            -- ctx: Name, Position, CFrame, Rotation, Seed, Random, Biome,
+        local p = Instance.new("Part")               --      Chunk, Parent, Terrain, Model
+        p.Anchored, p.Size, p.CFrame = true, Vector3.new(16, 56, 16), ctx.CFrame * CFrame.new(0, 20, 0)
+        p.Parent = ctx.Parent                        -- parent everything to ctx.Parent so it unloads with the chunk
+    end,
+})
+```
+
+Positions are deterministic from the world seed and the structure name, so a chunk regenerates the same structure when
+it reloads. A structure belongs to its *origin* chunk: it exists while that chunk is loaded (in
+`Workspace.GeneratedStructures/<Name>_<cx>_<cz>`) and is destroyed when it unloads. Placement is decided in the parallel
+workers; `Build` runs on the server main thread, so keep it cheap (tens of parts). Terrain edits through `ctx.Terrain`
+are possible but can be overwritten by neighbouring chunks that load later; prefer Parts / Models. Examples (a
+watchtower and desert ruins): `src/TerrainGenerator/Examples/Structures.luau`.
 
 ## Multiplayer streaming
 
@@ -158,9 +190,11 @@ src/TerrainGenerator/
   World/
     RandomState, BiomeRegistry, Climate, OverworldBiomeBuilder, BiomeSource (+ fuzzy BiomeManager zoom)
     NoiseFill (terrain), Aquifer, OreVeins, SurfaceSystem (+ vanilla surface rules), Carvers, Features, Blocks
-    ChunkGenerator.luau      pipeline: noise -> surface -> carvers -> features
-  Streaming/                 ChunkManager (state machine), ChunkWriter (Terrain writes), WorkerTemplate (Actor)
-  Examples/MagicalBiomes.luau
+    Structures               custom structure placement (random_spread, deterministic)
+    ChunkGenerator.luau      pipeline: noise -> surface -> carvers -> features -> structure placement
+  Streaming/                 ChunkManager (state machine), ChunkWriter (Terrain writes), StructureBuilder,
+                             LoadGovernor (adaptive job limit), WorkerTemplate (Actor)
+  Examples/MagicalBiomes.luau, Examples/Structures.luau
 ```
 
 Pipeline per 16×16-block chunk (in an Actor, parallel): density lattice at cell corners (4×8×4 blocks) → bulk fill of
@@ -182,7 +216,8 @@ The default 1024×1024 start-up area is 256 chunks ≈ 25 s of CPU, spread over 
 Keeping the game smooth (server and client): generation is time-sliced (`Workers.SliceMs`) so no parallel task holds a
 frame for a whole chunk; terrain writes are budgeted per frame (`Streaming.WriteBudgetMs`), reuse their voxel tables and
 create parts off-tree; at most one job runs per worker; `Config.Decoration = false` turns off Terrain grass blades
-(a large client FPS saver); tree/ore parts are thinned by default. In Studio the server and the client share one CPU,
+(a large client FPS saver); tree/ore parts are thinned by default; once players can spawn, `Streaming.AdaptiveLoad`
+lowers the number of concurrent chunk jobs whenever the server frame time exceeds `TargetFrameMs`. In Studio the server and the client share one CPU,
 so `Workers.Count` above your core count − 2 will make Studio itself feel laggy.
 
 Memory: every worker Actor holds its own copy of the generator — about 12 MB after initialisation (code, vanilla data,
@@ -211,7 +246,7 @@ I have confirmed against the game. To check: `GetBiomeAt` at a few coordinates v
 * Feature *positions* use a per-feature, per-chunk random rather than vanilla's decoration seeds, so tree/ore coordinates
   are not Minecraft's, though densities, height ranges, biome rules and species mixes are. Ore blobs (granite, dirt…)
   are simulated across chunk borders; sand/clay/gravel disks are clipped at chunk borders.
-* Not generated: structures (villages, mineshafts, strongholds…), lakes/springs, geodes, fossils, vegetation patches
+* Not generated: vanilla structures (villages, mineshafts, strongholds…; custom ones can be added, see Structures), lakes/springs, geodes, fossils, vegetation patches
   (grass, flowers, kelp, corals…), dripstone/moss decoration. Trees are placeholder parts.
 * Carver/spline arithmetic uses doubles instead of Java `float`s (sub-block boundary effects only).
 * `SmoothTerrain` (sub-voxel occupancy) is a Roblox-specific addition, not vanilla.

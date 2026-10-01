@@ -24,8 +24,12 @@ echo "noise fill shortcuts == brute force (slow)"
 run tests/shortcuts.luau --codegen | tail -1
 echo "time-sliced generation == uninterrupted generation"
 run tests/sliced.luau --codegen | tail -1
+echo "structures: random_spread placement, determinism, filters"
+run tests/structures.luau | tail -1
 echo "chunk writer against a mocked Terrain"
 run tests/writer.luau --codegen | tail -1
 echo "Start() end-to-end against mocked Roblox services"
 run tests/start_local.luau --codegen | tail -1
+echo "load governor"
+run tests/governor.luau | tail -1
 echo "all done"

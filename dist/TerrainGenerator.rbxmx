@@ -1,6 +1,6 @@
 <roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
 <Meta name="ExplicitAutoJoints">true</Meta>
-<Item class="ModuleScript" referent="RBX00047"><Properties><string name="Name">TerrainGenerator</string><ProtectedString name="Source"><![CDATA[--!strict
+<Item class="ModuleScript" referent="RBX00051"><Properties><string name="Name">TerrainGenerator</string><ProtectedString name="Source"><![CDATA[--!strict
 -- TerrainGenerator: a port of Minecraft Java 1.20.1's overworld generation to Roblox Terrain.
 --
 --   local TerrainGenerator = require(game.ServerScriptService.TerrainGenerator)
@@ -17,6 +17,9 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local Config = require(script.Config)
 local ChunkManager = require(script.Streaming.ChunkManager)
 local ChunkWriter = require(script.Streaming.ChunkWriter)
+local StructureBuilder = require(script.Streaming.StructureBuilder)
+local LoadGovernor = require(script.Streaming.LoadGovernor)
+local Structures = require(script.World.Structures)
 local ChunkGenerator = require(script.World.ChunkGenerator)
 local Queries = require(script.World.Queries)
 local Settings = require(script.Data.Settings)
@@ -42,6 +45,8 @@ initialEvent, TerrainGenerator.InitialAreaLoaded = newSignal() -- () the Width x
 spawnEvent, TerrainGenerator.SpawnAreaReady = newSignal() -- () characters can spawn
 
 local customBiomes: { any } = {}
+local structureDefs: { [string]: any } = {} -- full user definitions (Model / Build / Offset live here, main thread only)
+local structurePlacement: { any } = {} -- the plain-data part, sent to the workers
 local started = false
 local initialLoaded = false
 local spawnReady = false
@@ -66,6 +71,7 @@ local function generatorOptions(): any
 		oreDensity = Config.Collectables.OreDensity,
 		oreTiers = Config.Collectables.OreTiers,
 		smooth = Config.SmoothTerrain,
+		structures = Config.Structures.Enabled and structurePlacement or nil,
 	}
 end
 
@@ -84,7 +90,7 @@ end
 
 -- A generator instance on the calling thread, only for read-only queries (biome / height lookups).
 local function getQueryGenerator(): any
-	local key = tostring(Config.Seed) .. "|" .. #customBiomes
+	local key = tostring(Config.Seed) .. "|" .. #customBiomes .. "|" .. #structurePlacement
 	if queryGen == nil or queryKey ~= key then
 		queryGen = ChunkGenerator.new(Config.Seed, generatorOptions())
 		queryKey = key
@@ -158,6 +164,28 @@ function TerrainGenerator.RegisterBiome(definition: any)
 	local def = table.clone(definition)
 	def.base = def.base or "plains"
 	table.insert(customBiomes, def)
+end
+
+-- ---------------------------------------------------------------------------------------- structures
+-- Registers a structure. Call before Start(). See Examples/Structures.luau for a complete example.
+--   Name        unique string
+--   Spacing     chunks between structure cells (default 24; 1 chunk = 64 studs); Separation (default Spacing/3)
+--               is the minimum gap in chunks between two of this kind
+--   Chance      0..1 per cell (default 1)         Salt   number that reshuffles the layout (default 0)
+--   Biomes      list of biome names ("plains", "desert", custom biome ids...); nil = any
+--   Placement   "Land" (default) | "Water" | "Any"          MaxSlope  max ground height difference, blocks (4)
+--   Rotate      random 90 degree turns (default true)       Offset    Vector3 studs added to the ground point
+--   Model       Instance (Model/BasePart) cloned onto the ground, bottom of its bounding box on the surface
+--   Build       function(ctx) called on the server for every placed structure; parent what you create to
+--               ctx.Parent. ctx: Name, Position, CFrame, Rotation, Seed, Random, Biome, Chunk, Parent, Terrain, Model
+-- A structure lives as long as its origin chunk is loaded and is generated again (identically) when it reloads.
+function TerrainGenerator.RegisterStructure(definition: any)
+	assert(not started, "RegisterStructure must be called before TerrainGenerator.Start()")
+	local placement = Structures.normalize(definition)
+	assert(structureDefs[placement.Name] == nil, "duplicate structure " .. placement.Name)
+	assert(definition.Model ~= nil or definition.Build ~= nil, placement.Name .. ": give the structure a Model or a Build function")
+	structureDefs[placement.Name] = definition
+	table.insert(structurePlacement, placement)
 end
 
 -- ---------------------------------------------------------------------------------------- streaming state
@@ -267,14 +295,22 @@ local function startInner()
 	local actors: { Actor } = {}
 	local localGenerator: any = nil
 	local localWriter: any = nil
+	local builder: any = nil
+	if cfg.Structures.Enabled and #structurePlacement > 0 then
+		builder = StructureBuilder.new(structureDefs, cfg.Structures.FolderName, baseY())
+	end
 
 	local function report(kind: string, ...)
 		if kind == "done" then
-			local jobId, cx, cz, ok, err = ...
+			local jobId, cx, cz, ok, err, structures = ...
 			local w = jobWorker[jobId]
 			if w then
 				inflightBy[w] -= 1
 				jobWorker[jobId] = nil
+			end
+			-- build before onDone: if the chunk was cancelled meanwhile, onDone unloads it and removes the build
+			if ok and builder and structures then
+				builder:build(cx, cz, structures)
 			end
 			manager:onDone(jobId, cx, cz, ok, err)
 		end
@@ -302,9 +338,19 @@ local function startInner()
 			else
 				task.spawn(function()
 					task.wait()
+					local sliceStart = os.clock()
+					local sliceSeconds = cfg.Workers.SliceMs / 1000
 					local ok, err = pcall(function()
-						local chunk = localGenerator:generate(cx, cz)
+						local chunk = localGenerator:generate(cx, cz, function()
+							if os.clock() - sliceStart >= sliceSeconds then
+								task.wait()
+								sliceStart = os.clock()
+							end
+						end)
 						localWriter:write(chunk)
+						if builder and chunk.structures then
+							builder:build(cx, cz, chunk.structures)
+						end
 					end)
 					manager:onDone(jobId, cx, cz, ok, err and tostring(err) or nil)
 				end)
@@ -312,6 +358,9 @@ local function startInner()
 		end,
 		unload = function(cx: number, cz: number)
 			writer:unload(cx, cz)
+			if builder then
+				builder:unload(cx, cz)
+			end
 			chunkUnloadedEvent:Fire(cx, cz)
 		end,
 		onLoaded = function(cx: number, cz: number)
@@ -397,12 +446,17 @@ local function startInner()
 	end)
 
 	local accumulator = 0
+	local jobCap: number = manager.maxInFlight
+	local governor = LoadGovernor.new(jobCap, cfg.Streaming.TargetFrameMs / 1000)
 	heartbeat = RunService.Heartbeat:Connect(function(dt: number)
+		governor:sample(dt)
 		accumulator += dt
 		if accumulator < cfg.Streaming.UpdateInterval then
 			return
 		end
 		accumulator = 0
+		-- before players can spawn nobody is playing, so generate at full speed; afterwards protect the frame rate
+		manager.maxInFlight = if cfg.Streaming.AdaptiveLoad and spawnReady then governor:step() else jobCap
 		for _, player in Players:GetPlayers() do
 			local id = tostring(player.UserId)
 			local character = player.Character
@@ -522,6 +576,8 @@ export type Config = {
 		PlayerGraceSeconds: number,
 		KeepInitialArea: boolean,
 		WriteBudgetMs: number,
+		AdaptiveLoad: boolean,
+		TargetFrameMs: number,
 	},
 
 	Workers: {
@@ -538,6 +594,11 @@ export type Config = {
 		OreTiers: { [string]: number },
 		PartSize: Vector3,
 		ColorParts: boolean,
+	},
+
+	Structures: {
+		Enabled: boolean,
+		FolderName: string,
 	},
 
 	Spawn: {
@@ -577,6 +638,8 @@ local Config: Config = {
 		PlayerGraceSeconds = 30, -- a player without a character (respawning) keeps its window this long
 		KeepInitialArea = false, -- true: never unload the initial Width x Length area around (0, 0)
 		WriteBudgetMs = 3, -- terrain writes yield to the next frame after this many ms (smooths server hitches)
+		AdaptiveLoad = true, -- once players can spawn: fewer concurrent chunk jobs while the server frame time is high
+		TargetFrameMs = 25, -- ... i.e. when frames take longer than this (25 ms = 40 fps)
 	},
 
 	Workers = {
@@ -596,6 +659,12 @@ local Config: Config = {
 		OreTiers = { coal = 1, copper = 2, iron = 2, redstone = 3, lapis = 3, gold = 4, diamond = 5, emerald = 5 },
 		PartSize = Vector3.new(4, 4, 4),
 		ColorParts = true,
+	},
+
+	-- Custom structures registered with TerrainGenerator.RegisterStructure (see Examples/Structures.luau)
+	Structures = {
+		Enabled = true,
+		FolderName = "GeneratedStructures", -- created in Workspace
 	},
 
 	Spawn = {
@@ -2023,7 +2092,7 @@ function Compiler.cellInterval(sampler: Sampler, id: number, cx: number, cz: num
 end
 
 return Compiler
-]]></ProtectedString></Properties></Item></Item><Item class="Folder" referent="RBX00018"><Properties><string name="Name">Examples</string></Properties><Item class="ModuleScript" referent="RBX00017"><Properties><string name="Name">MagicalBiomes</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item></Item><Item class="Folder" referent="RBX00019"><Properties><string name="Name">Examples</string></Properties><Item class="ModuleScript" referent="RBX00017"><Properties><string name="Name">MagicalBiomes</string><ProtectedString name="Source"><![CDATA[--!strict
 -- Example custom ("magical") biomes for TerrainGenerator.RegisterBiome. They are plain data.
 --
 -- How a custom biome is placed: at every 4x4x4-block cell the generator first checks the custom biomes (highest
@@ -2068,7 +2137,76 @@ return {
 		ores = { { name = "ember_shard", tier = 5, perChunk = 0.7, minY = -32, maxY = 40, size = 4 } },
 	},
 }
-]]></ProtectedString></Properties></Item></Item><Item class="Folder" referent="RBX00024"><Properties><string name="Name">Noise</string></Properties><Item class="ModuleScript" referent="RBX00019"><Properties><string name="Name">BlendedNoise</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00018"><Properties><string name="Name">Structures</string><ProtectedString name="Source"><![CDATA[--!strict
+-- Example structures for TerrainGenerator.RegisterStructure:
+--
+--     for _, structure in require(TerrainGenerator.Examples.Structures) do
+--         TerrainGenerator.RegisterStructure(structure)
+--     end
+--
+-- A structure is a placement rule plus either a `Model` (any Model / Part you cloned from ServerStorage; it is
+-- stood on the ground) or a `Build(ctx)` function that creates whatever you like and parents it to ctx.Parent.
+-- Build runs on the server main thread for every placed structure, so keep it cheap (tens of parts, not thousands).
+--
+-- Using a model instead of code:
+--     TerrainGenerator.RegisterStructure({
+--         Name = "Hut", Model = game.ServerStorage.Hut, Spacing = 16, Biomes = { "plains", "forest" },
+--     })
+--
+-- ctx fields: Name, Position (ground point, studs), CFrame (Position + rotation), Rotation (degrees), Seed,
+-- Random (Random.new(Seed): same structure -> same variation every time), Biome, Chunk (Vector2), Parent, Terrain, Model.
+
+local function part(parent: Instance, cf: CFrame, size: Vector3, material: Enum.Material, color: Color3): Part
+	local p = Instance.new("Part")
+	p.Anchored = true
+	p.Size = size
+	p.CFrame = cf
+	p.Material = material
+	p.Color = color
+	p.Parent = parent
+	return p
+end
+
+return {
+	{
+		Name = "Watchtower",
+		Spacing = 20, -- about one tower per 20x20 chunks (1280 studs square) ...
+		Separation = 8, -- ... never closer than 8 chunks to another tower
+		Chance = 0.8,
+		Biomes = { "plains", "meadow", "forest", "taiga", "savanna", "sunflower_plains" },
+		Placement = "Land",
+		MaxSlope = 3,
+		Build = function(ctx)
+			local grey, wood = Color3.fromRGB(125, 125, 125), Color3.fromRGB(110, 80, 50)
+			-- shaft (sunk 8 studs into the ground so it never floats on a slope), platform, four parapet posts
+			part(ctx.Parent, ctx.CFrame * CFrame.new(0, 20, 0), Vector3.new(16, 56, 16), Enum.Material.Cobblestone, grey)
+			part(ctx.Parent, ctx.CFrame * CFrame.new(0, 50, 0), Vector3.new(28, 4, 28), Enum.Material.WoodPlanks, wood)
+			for _, corner in { { -12, -12 }, { 12, -12 }, { -12, 12 }, { 12, 12 } } do
+				part(ctx.Parent, ctx.CFrame * CFrame.new(corner[1], 56, corner[2]), Vector3.new(4, 8, 4), Enum.Material.WoodPlanks, wood)
+			end
+		end,
+	},
+	{
+		Name = "DesertRuins",
+		Spacing = 12,
+		Separation = 4,
+		Chance = 0.6,
+		Biomes = { "desert" },
+		Placement = "Land",
+		MaxSlope = 4,
+		Build = function(ctx)
+			local sand = Color3.fromRGB(216, 203, 152)
+			-- a ring of broken pillars; ctx.Random makes every ruin different but always the same ruin per seed
+			for i = 1, 6 do
+				local angle = i / 6 * math.pi * 2
+				local height = 8 + ctx.Random:NextNumber() * 20
+				local offset = CFrame.new(math.cos(angle) * 18, height / 2 - 4, math.sin(angle) * 18)
+				part(ctx.Parent, ctx.CFrame * offset, Vector3.new(6, height, 6), Enum.Material.Sandstone, sand)
+			end
+		end,
+	},
+}
+]]></ProtectedString></Properties></Item></Item><Item class="Folder" referent="RBX00025"><Properties><string name="Name">Noise</string></Properties><Item class="ModuleScript" referent="RBX00020"><Properties><string name="Name">BlendedNoise</string><ProtectedString name="Source"><![CDATA[--!strict
 --!native
 -- BlendedNoise: the pre-1.18 "old" terrain noise, still the 3D detail term of overworld terrain.
 -- Three legacy-initialised Perlin stacks: two limit noises (16 octaves) blended by a selector (8 octaves).
@@ -2185,7 +2323,7 @@ function BlendedNoise.compute(self: BlendedNoise, bx: number, by: number, bz: nu
 end
 
 return BlendedNoise
-]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00020"><Properties><string name="Name">ImprovedNoise</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00021"><Properties><string name="Name">ImprovedNoise</string><ProtectedString name="Source"><![CDATA[--!strict
 --!native
 -- Minecraft's ImprovedNoise (Perlin gradient noise with a shuffled permutation table).
 -- The permutation is stored doubled (512 entries, 1-based) so no masking is needed in the hot path.
@@ -2332,7 +2470,7 @@ function ImprovedNoise.sample(self: ImprovedNoise, x: number, y: number, z: numb
 end
 
 return ImprovedNoise
-]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00021"><Properties><string name="Name">NormalNoise</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00022"><Properties><string name="Name">NormalNoise</string><ProtectedString name="Source"><![CDATA[--!strict
 --!native
 -- NormalNoise: two offset Perlin stacks averaged and normalised (what noise_router "noise" nodes sample).
 
@@ -2377,7 +2515,7 @@ function NormalNoise.getValue(self: NormalNoise, x: number, y: number, z: number
 end
 
 return NormalNoise
-]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00022"><Properties><string name="Name">PerlinNoise</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00023"><Properties><string name="Name">PerlinNoise</string><ProtectedString name="Source"><![CDATA[--!strict
 --!native
 -- Multi-octave Perlin noise (Minecraft's PerlinNoise), both the modern "octave_N" hashed
 -- initialisation and the legacy sequential one that BlendedNoise still uses.
@@ -2496,7 +2634,7 @@ function PerlinNoise.wrap(d: number): number
 end
 
 return PerlinNoise
-]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00023"><Properties><string name="Name">SimplexNoise</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00024"><Properties><string name="Name">SimplexNoise</string><ProtectedString name="Source"><![CDATA[--!strict
 -- SimplexNoise + PerlinSimplexNoise (2D), used by Biome temperature (snow line, frozen oceans).
 -- These noises are world-independent: vanilla seeds them with fixed constants (1234, 2345, 3456).
 
@@ -2615,7 +2753,7 @@ function Perlin.getValue(self: Perlin, x: number, y: number, useOffsets: boolean
 end
 
 return { SimplexNoise = SimplexNoise, Perlin = Perlin }
-]]></ProtectedString></Properties></Item></Item><Item class="Folder" referent="RBX00029"><Properties><string name="Name">Streaming</string></Properties><Item class="ModuleScript" referent="RBX00025"><Properties><string name="Name">ChunkManager</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item></Item><Item class="Folder" referent="RBX00032"><Properties><string name="Name">Streaming</string></Properties><Item class="ModuleScript" referent="RBX00026"><Properties><string name="Name">ChunkManager</string><ProtectedString name="Source"><![CDATA[--!strict
 -- Multiplayer-safe chunk streaming state machine (pure logic, no Roblox APIs).
 --
 -- Every tracked "source" (a player, or a named anchor such as the initial world area) wants a square window of
@@ -2929,7 +3067,7 @@ function ChunkManager.onDone(self: any, jobId: number, cx: number, cz: number, o
 end
 
 return ChunkManager
-]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00026"><Properties><string name="Name">ChunkWriter</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00027"><Properties><string name="Name">ChunkWriter</string><ProtectedString name="Source"><![CDATA[--!strict
 --!native
 -- Turns generated chunk data into Roblox Terrain voxels and collectable Parts, and removes them again.
 -- Runs in the serial phase (Terrain writes and Instance creation are not parallel-safe).
@@ -3282,7 +3420,146 @@ function ChunkWriter.unload(self: any, cx: number, cz: number)
 end
 
 return ChunkWriter
-]]></ProtectedString></Properties></Item><Item class="Actor" referent="RBX00028"><Properties><string name="Name">WorkerTemplate</string></Properties><Item class="Script" referent="RBX00027"><Properties><string name="Name">Worker</string><bool name="Disabled">true</bool><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00028"><Properties><string name="Name">LoadGovernor</string><ProtectedString name="Source"><![CDATA[--!strict
+-- Adaptive load control: keeps generation from eating the frame. Fed with the server's frame time, it lowers the
+-- number of concurrent chunk jobs when frames get slow and raises it again (up to `cap`) once they recover.
+-- Pure logic so it can be tested without Roblox.
+
+local LoadGovernor = {}
+LoadGovernor.__index = LoadGovernor
+
+-- cap: most jobs allowed in flight; targetSeconds: frame time above which we back off (e.g. 0.025 = 40 fps)
+function LoadGovernor.new(cap: number, targetSeconds: number)
+	return setmetatable({ cap = cap, target = targetSeconds, limit = cap, ema = 1 / 60, calm = 0 }, LoadGovernor)
+end
+
+-- dt: seconds of the last frame
+function LoadGovernor.sample(self: any, dt: number)
+	self.ema += (math.min(dt, 1) - self.ema) * 0.15
+end
+
+-- Call at a fixed interval; returns the current job limit.
+function LoadGovernor.step(self: any): number
+	if self.ema > self.target then
+		self.limit = math.max(1, self.limit - 1)
+		self.calm = 0
+	elseif self.ema < self.target * 0.7 then
+		self.calm += 1
+		if self.calm >= 2 then -- two calm intervals in a row before ramping up again (avoids oscillation)
+			self.limit = math.min(self.cap, self.limit + 1)
+			self.calm = 0
+		end
+	end
+	return self.limit
+end
+
+return LoadGovernor
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00029"><Properties><string name="Name">StructureBuilder</string><ProtectedString name="Source"><![CDATA[--!strict
+-- Builds registered structures on the main thread when the worker reports a chunk as written, and removes them
+-- again when that chunk unloads. A structure belongs to its *origin* chunk: it lives while that chunk is loaded.
+--
+-- Everything a structure creates should be parented to ctx.Parent (a Folder under Workspace.GeneratedStructures)
+-- so unloading can clean it up. Terrain edits are possible (ctx.Terrain) but neighbouring chunks that have not
+-- been written yet will overwrite them, so prefer Parts / Models.
+
+local Settings = require(script.Parent.Parent.Data.Settings)
+
+local MIN_Y = Settings.minY
+local VOXEL = 4
+
+local StructureBuilder = {}
+StructureBuilder.__index = StructureBuilder
+
+-- defs: { [name]: full user definition (with Model / Build / Offset) }
+function StructureBuilder.new(defs: { [string]: any }, folderName: string, bedrockLevel: number)
+	local root = workspace:FindFirstChild(folderName)
+	if not root then
+		local f = Instance.new("Folder")
+		f.Name = folderName
+		f.Parent = workspace
+		root = f
+	end
+	return setmetatable({ defs = defs, root = root, byChunk = {} :: { [string]: { Instance } }, bedrockLevel = bedrockLevel }, StructureBuilder)
+end
+
+-- Clones def.Model and stands its bounding box on the ground point of `cf`.
+local function placeModel(model: Instance, cf: CFrame, parent: Instance): Instance
+	local clone = model:Clone()
+	if clone:IsA("Model") then
+		local boxCf, boxSize = clone:GetBoundingBox()
+		local pivotToBox = clone:GetPivot():ToObjectSpace(boxCf)
+		clone:PivotTo(cf * CFrame.new(0, boxSize.Y / 2, 0) * pivotToBox:Inverse())
+	elseif clone:IsA("BasePart") then
+		clone.CFrame = cf * CFrame.new(0, clone.Size.Y / 2, 0)
+	end
+	clone.Parent = parent
+	return clone
+end
+
+local unloadChunk: (any, number, number) -> ()
+
+function StructureBuilder.build(self: any, cx: number, cz: number, placements: { any })
+	unloadChunk(self, cx, cz) -- never leave a previous build of this chunk behind
+	local made: { Instance } = {}
+	for _, p in placements do
+		local def = self.defs[p.name]
+		if def then
+			local folder = Instance.new("Folder")
+			folder.Name = string.format("%s_%d_%d", p.name, cx, cz)
+			-- ground point: centre of the origin block column, on top of the highest solid block
+			local pos = Vector3.new((p.x + 0.5) * VOXEL, self.bedrockLevel + (p.y - MIN_Y + 1) * VOXEL, (p.z + 0.5) * VOXEL)
+			if def.Offset then
+				pos += def.Offset
+			end
+			local cf = CFrame.new(pos) * CFrame.Angles(0, p.rot * math.pi / 2, 0)
+			local ctx = {
+				Name = p.name,
+				Position = pos, -- studs, ground level at the structure origin
+				CFrame = cf, -- Position, rotated by Rotation
+				Rotation = p.rot * 90, -- degrees around Y
+				Seed = p.seed, -- stable per structure: feed it to Random.new for deterministic variation
+				Random = Random.new(p.seed),
+				Biome = p.biome,
+				Chunk = Vector2.new(cx, cz),
+				Parent = folder,
+				Terrain = workspace.Terrain,
+				Model = nil :: Instance?,
+			}
+			local ok, err = pcall(function()
+				if def.Model then
+					ctx.Model = placeModel(def.Model, cf, folder)
+				end
+				if def.Build then
+					def.Build(ctx)
+				end
+			end)
+			if not ok then
+				warn(string.format("[TerrainGenerator] structure %s at chunk (%d, %d) failed: %s", p.name, cx, cz, tostring(err)))
+			end
+			folder.Parent = self.root
+			table.insert(made, folder)
+		end
+	end
+	if #made > 0 then
+		self.byChunk[cx .. "," .. cz] = made
+	end
+end
+
+function StructureBuilder.unload(self: any, cx: number, cz: number)
+	local key = cx .. "," .. cz
+	local made = self.byChunk[key]
+	if made then
+		self.byChunk[key] = nil
+		for _, inst in made do
+			inst:Destroy()
+		end
+	end
+end
+
+unloadChunk = StructureBuilder.unload
+
+return StructureBuilder
+]]></ProtectedString></Properties></Item><Item class="Actor" referent="RBX00031"><Properties><string name="Name">WorkerTemplate</string></Properties><Item class="Script" referent="RBX00030"><Properties><string name="Name">Worker</string><bool name="Disabled">true</bool><ProtectedString name="Source"><![CDATA[--!strict
 --!native
 -- Chunk worker. This script lives in an Actor cloned by TerrainGenerator.Start(); the template stored in the
 -- module tree is disabled so it never runs in place.
@@ -3291,7 +3568,7 @@ return ChunkWriter
 --   "Init"     settings                    build the world generator (parallel), then acknowledge
 --   "Generate" jobId, chunkX, chunkZ       generate the chunk in parallel, write it in the serial phase,
 --                                          then report to the main thread through the Done event
--- worker -> main (BindableEvent "Events"):  ("bound") / ("ready", actorName) / ("done", jobId, cx, cz, ok, err)
+-- worker -> main (BindableEvent "Events"):  ("bound") / ("ready", actorName) / ("done", jobId, cx, cz, ok, err, structures)
 
 local actor = script:GetActor()
 if actor == nil then
@@ -3372,6 +3649,7 @@ actor:BindToMessageParallel("Generate", function(jobId: number, cx: number, cz: 
 	release()
 	task.synchronize()
 	local err: string? = nil
+	local structures = ok and result.structures or nil
 	if ok then
 		local wok, werr = pcall(function()
 			writer:write(result)
@@ -3382,11 +3660,11 @@ actor:BindToMessageParallel("Generate", function(jobId: number, cx: number, cz: 
 	else
 		err = tostring(result)
 	end
-	events:Fire("done", jobId, cx, cz, ok, err)
+	events:Fire("done", jobId, cx, cz, ok, err, structures)
 end)
 
 events:Fire("bound", actor.Name)
-]]></ProtectedString></Properties></Item></Item></Item><Item class="Folder" referent="RBX00046"><Properties><string name="Name">World</string></Properties><Item class="ModuleScript" referent="RBX00030"><Properties><string name="Name">Aquifer</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item></Item></Item><Item class="Folder" referent="RBX00050"><Properties><string name="Name">World</string></Properties><Item class="ModuleScript" referent="RBX00033"><Properties><string name="Name">Aquifer</string><ProtectedString name="Source"><![CDATA[--!strict
 --!native
 -- Port of NoiseBasedChunkGenerator's NoiseBasedAquifer: decides, for every non-solid voxel, whether it is
 -- air, water or lava, using a jittered grid of "aquifer" cells (16 x 12 x 16 blocks), per-cell fluid levels
@@ -3684,7 +3962,7 @@ function Aquifer.compute(self: Aquifer, x: number, y: number, z: number, density
 end
 
 return Aquifer
-]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00031"><Properties><string name="Name">BiomeRegistry</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00034"><Properties><string name="Name">BiomeRegistry</string><ProtectedString name="Source"><![CDATA[--!strict
 -- Assigns numeric ids to vanilla and custom ("magical") biomes and resolves what each one inherits.
 --
 -- A custom biome is plain data (so it can be sent to worker Actors):
@@ -3783,7 +4061,7 @@ function BiomeRegistry.new(definitions: { Custom }?): Registry
 end
 
 return BiomeRegistry
-]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00032"><Properties><string name="Name">BiomeSource</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00035"><Properties><string name="Name">BiomeSource</string><ProtectedString name="Source"><![CDATA[--!strict
 --!native
 -- MultiNoiseBiomeSource + BiomeManager for the overworld.
 --   getNoiseBiome(qx, qy, qz): the biome stored at a 4x4x4 block "quart" cell (what vanilla writes to chunk data)
@@ -4004,7 +4282,7 @@ function BiomeSource.getBiome(self: BiomeSource, x: number, y: number, z: number
 end
 
 return BiomeSource
-]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00033"><Properties><string name="Name">BiomeTemperature</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00036"><Properties><string name="Name">BiomeTemperature</string><ProtectedString name="Source"><![CDATA[--!strict
 -- Biome.getTemperature(pos): base temperature, the FROZEN modifier (frozen oceans), and the cooling above y=80
 -- that puts snow on tall mountains. The three simplex noises are seeded with vanilla's fixed constants.
 
@@ -4041,7 +4319,7 @@ function BiomeTemperature.coldEnoughToSnow(biome: any, x: number, y: number, z: 
 end
 
 return BiomeTemperature
-]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00034"><Properties><string name="Name">Blocks</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00037"><Properties><string name="Name">Blocks</string><ProtectedString name="Source"><![CDATA[--!strict
 -- Block registry: compact ids for the generator's u8 block buffers and the Minecraft block ->
 -- Roblox Terrain material palette.
 --
@@ -4182,7 +4460,7 @@ function Blocks.terrainIdFor(name: string, y: number): number
 end
 
 return Blocks
-]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00035"><Properties><string name="Name">Carvers</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00038"><Properties><string name="Name">Carvers</string><ProtectedString name="Source"><![CDATA[--!strict
 --!native
 -- Port of the classic carvers (CaveWorldCarver, CanyonWorldCarver, WorldCarver.carveEllipsoid) and the
 -- CarvingMask, driven by java.util.Random exactly as vanilla does: every chunk replays the carvers of the
@@ -4586,7 +4864,7 @@ function Carvers.recomputeHeightmaps(chunk: any)
 end
 
 return Carvers
-]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00036"><Properties><string name="Name">ChunkGenerator</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00039"><Properties><string name="Name">ChunkGenerator</string><ProtectedString name="Source"><![CDATA[--!strict
 -- Assembles the per-world generation pipeline and produces chunk data (pure Luau, no Roblox APIs).
 
 local RandomState = require(script.Parent.RandomState)
@@ -4598,6 +4876,7 @@ local BiomeSource = require(script.Parent.BiomeSource)
 local SurfaceSystem = require(script.Parent.SurfaceSystem)
 local Carvers = require(script.Parent.Carvers)
 local Features = require(script.Parent.Features)
+local Structures = require(script.Parent.Structures)
 
 local HEIGHT = Settings.height
 
@@ -4613,13 +4892,14 @@ export type Chunk = {
 	aquifer: any?,
 	carvedList: { number }?,
 	collectables: { any },
+	structures: { any }?, -- placements whose origin is this chunk (see World/Structures)
 }
 
 local ChunkGenerator = {}
 ChunkGenerator.__index = ChunkGenerator
 
 -- seed: number or string; options.customBiomes: { BiomeRegistry.Custom }
-function ChunkGenerator.new(seed: number | string, options: { customBiomes: { any }?, treeDensity: number?, oreDensity: number?, oreTiers: { [string]: number }?, smooth: boolean? }?)
+function ChunkGenerator.new(seed: number | string, options: { customBiomes: { any }?, treeDensity: number?, oreDensity: number?, oreTiers: { [string]: number }?, smooth: boolean?, structures: { any }? }?)
 	local sh, sl = RandomState.seedFrom(seed)
 	local rs = RandomState.new(sh, sl)
 	local sampler = Compiler.compile(rs)
@@ -4635,6 +4915,9 @@ function ChunkGenerator.new(seed: number | string, options: { customBiomes: { an
 	setmetatable(self, ChunkGenerator)
 	self.surface = SurfaceSystem.new(self)
 	self.features = Features.new(self, options)
+	if options and options.structures and #options.structures > 0 then
+		self.structures = Structures.new(self, options.structures)
+	end
 	return self
 end
 
@@ -4704,12 +4987,15 @@ function ChunkGenerator.generate(self: any, cx: number, cz: number, yieldFn: (()
 		yieldFn()
 	end
 	Features.generate(self.features, chunk)
+	if self.structures then
+		chunk.structures = Structures.place(self.structures, chunk)
+	end
 	chunk.aquifer = nil
 	return chunk
 end
 
 return ChunkGenerator
-]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00037"><Properties><string name="Name">Climate</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00040"><Properties><string name="Name">Climate</string><ProtectedString name="Source"><![CDATA[--!strict
 --!native
 -- Climate.ParameterPoint + the nearest-parameter search used by MultiNoiseBiomeSource.
 -- Vanilla stores the points in an R-tree; we use a bounding-volume tree over the same 7 dimensions
@@ -4920,7 +5206,7 @@ end
 Climate.boxDistance = boxDistance
 
 return Climate
-]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00038"><Properties><string name="Name">Features</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00041"><Properties><string name="Name">Features</string><ProtectedString name="Source"><![CDATA[--!strict
 --!native
 -- Feature stage: interprets the vanilla placed-feature JSON (placement modifiers + feature programs) for
 -- the features that matter to a Roblox world:
@@ -5712,7 +5998,7 @@ function Features.generate(self: any, chunk: any)
 end
 
 return Features
-]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00039"><Properties><string name="Name">NoiseFill</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00042"><Properties><string name="Name">NoiseFill</string><ProtectedString name="Source"><![CDATA[--!strict
 --!native
 -- NoiseBasedChunkGenerator.fillFromNoise: turns the interpolated final density into stone / air /
 -- water / lava voxels for one 16x16 chunk column, applying aquifers and ore veins.
@@ -5956,7 +6242,7 @@ function NoiseFill.fill(self: any, chunk: any)
 end
 
 return NoiseFill
-]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00040"><Properties><string name="Name">OreVeins</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00043"><Properties><string name="Name">OreVeins</string><ProtectedString name="Source"><![CDATA[--!strict
 --!native
 -- Port of OreVeinifier: the huge copper (y 0..50) and iron (y -60..-8) veins carved into stone by the
 -- vein_toggle / vein_ridged / vein_gap density functions.
@@ -6013,7 +6299,7 @@ function OreVeins.new(toggle: (number, number, number) -> number, ridged: (numbe
 end
 
 return OreVeins
-]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00041"><Properties><string name="Name">OverworldBiomeBuilder</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00044"><Properties><string name="Name">OverworldBiomeBuilder</string><ProtectedString name="Source"><![CDATA[--!strict
 -- Port of net.minecraft.world.level.biome.OverworldBiomeBuilder (1.20.x): the table that maps climate
 -- parameter boxes (temperature, humidity, continentalness, erosion, depth, weirdness) to biomes.
 
@@ -6364,7 +6650,7 @@ function Builder.build(): { Climate.Point }
 end
 
 return Builder
-]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00042"><Properties><string name="Name">Providers</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00045"><Properties><string name="Name">Providers</string><ProtectedString name="Source"><![CDATA[--!strict
 -- Samplers for vanilla's value providers (IntProvider / FloatProvider / HeightProvider) as they appear in the
 -- worldgen JSON. `random` is any object with nextInt(bound), nextFloat().
 
@@ -6486,7 +6772,7 @@ function Providers.height(spec: any, random: any): number
 end
 
 return Providers
-]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00043"><Properties><string name="Name">Queries</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00046"><Properties><string name="Name">Queries</string><ProtectedString name="Source"><![CDATA[--!strict
 -- Read-only world queries that need no chunk to be loaded (used by TerrainGenerator.GetBiomeAt / GetHeightAt).
 
 local Compiler = require(script.Parent.Parent.Density.Compiler)
@@ -6523,7 +6809,7 @@ function Queries.climate(gen: any, bx: number, by: number, bz: number): { [strin
 end
 
 return Queries
-]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00044"><Properties><string name="Name">RandomState</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00047"><Properties><string name="Name">RandomState</string><ProtectedString name="Source"><![CDATA[--!strict
 -- Mirrors net.minecraft.world.level.levelgen.RandomState: one root positional random per world seed,
 -- from which every named noise / random factory is derived by hashing its resource name.
 
@@ -6616,7 +6902,123 @@ function RandomState.getBlended(self: RandomState, xzScale: number, yScale: numb
 end
 
 return RandomState
-]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00045"><Properties><string name="Name">SurfaceSystem</string><ProtectedString name="Source"><![CDATA[--!strict
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00048"><Properties><string name="Name">Structures</string><ProtectedString name="Source"><![CDATA[--!strict
+-- Custom structure placement: pure data in, plain placement records out (the building itself happens on the main
+-- thread, see Streaming/StructureBuilder, because it runs user code and creates Instances).
+--
+-- Modelled on Minecraft's `random_spread` placement: the world is cut into Spacing x Spacing chunk cells and every
+-- cell may hold one structure, whose origin chunk is a seeded random offset inside the cell (leaving a margin of
+-- Separation chunks). So two structures of one kind are always >= Separation chunks apart, and the layout depends
+-- only on the world seed and the structure name: regenerating a chunk gives the same structure again.
+
+local Settings = require(script.Parent.Parent.Data.Settings)
+
+local floor, abs = math.floor, math.abs
+local SEA_LEVEL = Settings.seaLevel
+
+export type Def = {
+	Name: string,
+	Spacing: number, -- chunks between structure cells (16 blocks = 64 studs per chunk)
+	Separation: number, -- minimum chunks between two structures of this kind (< Spacing)
+	Chance: number, -- 0..1, probability that a cell holds a structure
+	Salt: number, -- changes the layout of this kind without renaming it
+	Biomes: { [string]: boolean }?, -- allowed biome names (nil = any biome)
+	Placement: string, -- "Land" | "Water" | "Any"
+	MaxSlope: number, -- max ground height difference (blocks) across the footprint
+	Rotate: boolean, -- random 90 degree rotation
+}
+
+local Structures = {}
+Structures.__index = Structures
+
+local function biomeSet(list: any): { [string]: boolean }?
+	if list == nil then
+		return nil
+	end
+	assert(type(list) == "table", "Biomes must be a list of biome names")
+	local set: { [string]: boolean } = {}
+	for _, name in list do
+		set[(string.gsub(tostring(name), "^minecraft:", ""))] = true
+	end
+	return set
+end
+
+-- Validates a user definition and returns the placement part (plain data, safe to send to a worker).
+function Structures.normalize(def: any): any
+	assert(type(def) == "table", "structure definition must be a table")
+	assert(type(def.Name) == "string" and def.Name ~= "", "structure needs a string `Name`")
+	local spacing = def.Spacing or 24
+	local separation = def.Separation or math.floor(spacing / 3)
+	assert(type(spacing) == "number" and spacing >= 2 and spacing % 1 == 0, def.Name .. ": Spacing must be a whole number >= 2")
+	assert(type(separation) == "number" and separation >= 0 and separation < spacing and separation % 1 == 0, def.Name .. ": Separation must be a whole number below Spacing")
+	local placement = def.Placement or "Land"
+	assert(placement == "Land" or placement == "Water" or placement == "Any", def.Name .. ": Placement must be Land, Water or Any")
+	return {
+		Name = def.Name,
+		Spacing = spacing,
+		Separation = separation,
+		Chance = math.clamp(def.Chance or 1, 0, 1),
+		Salt = def.Salt or 0,
+		Biomes = def.Biomes and table.clone(def.Biomes) or nil, -- list form; converted when a generator is built
+		Placement = placement,
+		MaxSlope = def.MaxSlope or 4,
+		Rotate = def.Rotate ~= false,
+	}
+end
+
+-- defs: list of Structures.normalize() results.
+function Structures.new(gen: any, defs: { any }): any
+	local list = {}
+	for _, d in defs do
+		local def = table.clone(d)
+		def.Biomes = biomeSet(d.Biomes)
+		def.factory = gen.rs.random:fromHashOf("terraingenerator:structure/" .. d.Name):forkPositional()
+		table.insert(list, def)
+	end
+	return setmetatable({ defs = list, names = gen.registry.names }, Structures)
+end
+
+-- Placement records for the structures whose origin chunk is `chunk`:
+--   { name, x, y, z (block coordinates; y = top ground block), rot (0..3), seed, biome }
+function Structures.place(self: any, chunk: any): { any }
+	local out = {}
+	local cx, cz = chunk.cx, chunk.cz
+	for _, d in self.defs do
+		local spacing = d.Spacing
+		local rx, rz = floor(cx / spacing), floor(cz / spacing)
+		local rnd = d.factory:at(rx, d.Salt, rz)
+		local span = spacing - d.Separation
+		local ox, oz = rx * spacing + rnd:nextInt(span), rz * spacing + rnd:nextInt(span)
+		if ox == cx and oz == cz and rnd:nextDouble() < d.Chance then
+			local lx, lz = 4 + rnd:nextInt(8), 4 + rnd:nextInt(8)
+			local rot = d.Rotate and rnd:nextInt(4) or 0
+			local seed = rnd:nextInt(2147483647)
+			local col = lx * 16 + lz + 1
+			local floorY, topY = chunk.floorY[col], chunk.topY[col]
+			local underwater = topY > floorY
+			local okPlacement = (d.Placement == "Any")
+				or (d.Placement == "Land" and not underwater and floorY >= SEA_LEVEL)
+				or (d.Placement == "Water" and underwater)
+			local biome = self.names[chunk.biomeTop[col]]
+			if okPlacement and (d.Biomes == nil or d.Biomes[biome]) then
+				-- ground must be reasonably flat around the origin (5 samples, 3 blocks out, inside the chunk)
+				local lo, hi = floorY, floorY
+				for _, off in { { -3, 0 }, { 3, 0 }, { 0, -3 }, { 0, 3 } } do
+					local x, z = math.clamp(lx + off[1], 0, 15), math.clamp(lz + off[2], 0, 15)
+					local y = chunk.floorY[x * 16 + z + 1]
+					lo, hi = math.min(lo, y), math.max(hi, y)
+				end
+				if abs(hi - lo) <= d.MaxSlope then
+					table.insert(out, { name = d.Name, x = cx * 16 + lx, y = floorY, z = cz * 16 + lz, rot = rot, seed = seed, biome = biome })
+				end
+			end
+		end
+	end
+	return out
+end
+
+return Structures
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX00049"><Properties><string name="Name">SurfaceSystem</string><ProtectedString name="Source"><![CDATA[--!strict
 --!native
 -- Port of SurfaceRules + SurfaceSystem: applies the vanilla surface rule JSON (grass/dirt/sand, bedrock and
 -- deepslate gradients, badlands bands, snow, ...) to a chunk, plus the eroded-badlands pillars and
@@ -7096,8 +7498,13 @@ end
 
 return SurfaceSystem
 ]]></ProtectedString></Properties></Item></Item></Item>
-<Item class="Script" referent="RBX00048"><Properties><string name="Name">TerrainGeneratorRunner</string><ProtectedString name="Source"><![CDATA[--!strict
--- Starts the terrain generator when the server boots. Delete this script and call TerrainGenerator.Start()
+<Item class="Script" referent="RBX00052"><Properties><string name="Name">TerrainGeneratorRunner</string><ProtectedString name="Source"><![CDATA[--!strict
+-- Starts the terrain generator when the server boots. Delete this script and call -- Optional custom structures (a watchtower and desert ruins; see Examples/Structures.luau to write your own):
+-- for _, structure in require(TerrainGenerator.Examples.Structures) do
+--     TerrainGenerator.RegisterStructure(structure)
+-- end
+
+TerrainGenerator.Start()
 -- from your own code if you want to change the Config first.
 
 local ServerScriptService = game:GetService("ServerScriptService")
@@ -7110,6 +7517,11 @@ local TerrainGenerator = require(ServerScriptService:WaitForChild("TerrainGenera
 -- Optional "magical" biomes (they overlay the vanilla map where their climate/noise conditions match):
 -- for _, biome in require(TerrainGenerator.Examples.MagicalBiomes) do
 --     TerrainGenerator.RegisterBiome(biome)
+-- end
+
+-- Optional custom structures (a watchtower and desert ruins; see Examples/Structures.luau to write your own):
+-- for _, structure in require(TerrainGenerator.Examples.Structures) do
+--     TerrainGenerator.RegisterStructure(structure)
 -- end
 
 TerrainGenerator.Start()

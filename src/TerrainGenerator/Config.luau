@@ -29,6 +29,8 @@ export type Config = {
 		PlayerGraceSeconds: number,
 		KeepInitialArea: boolean,
 		WriteBudgetMs: number,
+		AdaptiveLoad: boolean,
+		TargetFrameMs: number,
 	},
 
 	Workers: {
@@ -45,6 +47,11 @@ export type Config = {
 		OreTiers: { [string]: number },
 		PartSize: Vector3,
 		ColorParts: boolean,
+	},
+
+	Structures: {
+		Enabled: boolean,
+		FolderName: string,
 	},
 
 	Spawn: {
@@ -84,6 +91,8 @@ local Config: Config = {
 		PlayerGraceSeconds = 30, -- a player without a character (respawning) keeps its window this long
 		KeepInitialArea = false, -- true: never unload the initial Width x Length area around (0, 0)
 		WriteBudgetMs = 3, -- terrain writes yield to the next frame after this many ms (smooths server hitches)
+		AdaptiveLoad = true, -- once players can spawn: fewer concurrent chunk jobs while the server frame time is high
+		TargetFrameMs = 25, -- ... i.e. when frames take longer than this (25 ms = 40 fps)
 	},
 
 	Workers = {
@@ -103,6 +112,12 @@ local Config: Config = {
 		OreTiers = { coal = 1, copper = 2, iron = 2, redstone = 3, lapis = 3, gold = 4, diamond = 5, emerald = 5 },
 		PartSize = Vector3.new(4, 4, 4),
 		ColorParts = true,
+	},
+
+	-- Custom structures registered with TerrainGenerator.RegisterStructure (see Examples/Structures.luau)
+	Structures = {
+		Enabled = true,
+		FolderName = "GeneratedStructures", -- created in Workspace
 	},
 
 	Spawn = {

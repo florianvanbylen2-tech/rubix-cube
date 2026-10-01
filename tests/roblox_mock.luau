@@ -10,10 +10,19 @@ V3.__mul = function(a, b) if type(b) == "number" then return vec(a.X * b, a.Y * 
 V3.__div = function(a, b) return vec(a.X / b, a.Y / b, a.Z / b) end
 V3.__eq = function(a, b) return a.X == b.X and a.Y == b.Y and a.Z == b.Z end
 Vector3 = { new = function(x, y, z) return vec(x or 0, y or 0, z or 0) end }
-CFrame = { new = function(x, y, z)
-	if type(x) == "table" then return { Position = x } end
-	return { Position = vec(x, y, z) }
-end }
+local CF = {}
+CF.__index = CF
+CF.__mul = function(a, b) if getmetatable(b) == CF then return setmetatable({ Position = a.Position + b.Position, Yaw = (a.Yaw or 0) + (b.Yaw or 0) }, CF) end return a.Position + b end
+CFrame = {
+	new = function(x, y, z)
+		if type(x) == "table" then return setmetatable({ Position = x }, CF) end
+		return setmetatable({ Position = vec(x, y, z) }, CF)
+	end,
+	Angles = function(_, yaw, _) return setmetatable({ Position = vec(0, 0, 0), Yaw = yaw }, CF) end,
+}
+Vector2 = { new = function(x, y) return { X = x, Y = y } end }
+Random = { new = function(seed) local s = seed return { NextNumber = function() s = (s * 1103515245 + 12345) % 2147483648 return s / 2147483648 end } end }
+warn = warn or print
 Region3 = { new = function(a, b) return { Min = a, Max = b } end }
 Color3 = { fromRGB = function(r, g, b) return { R = r, G = g, B = b } end }
 RaycastParams = { new = function() return { IgnoreWater = false } end }

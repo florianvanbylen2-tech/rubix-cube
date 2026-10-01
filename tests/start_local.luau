@@ -15,6 +15,19 @@ C.PrintProgress = true
 TerrainGenerator.RegisterBiome({ id = "crystal_meadow", base = "meadow", climate = { temperature = { -1, 1 } }, region = { scale = 300, threshold = -2 }, surface = { top = "calcite", filler = "calcite" },
 	trees = { { species = "crystal_tree", perChunk = 3 } }, ores = { { name = "mana", tier = 4, perChunk = 2, minY = -10, maxY = 50, size = 5 } } })
 
+local builds, lastCtx = 0, nil
+TerrainGenerator.RegisterStructure({
+	Name = "Test", Spacing = 2, Separation = 0, Chance = 1, Placement = "Any", MaxSlope = 99,
+	Build = function(ctx)
+		builds += 1
+		lastCtx = ctx
+		local p = Instance.new("Part")
+		p.Parent = ctx.Parent
+	end,
+})
+assert(not pcall(TerrainGenerator.RegisterStructure, { Name = "Test", Build = function() end }), "duplicate structure name accepted")
+assert(not pcall(TerrainGenerator.RegisterStructure, { Name = "Empty" }), "structure without Model/Build accepted")
+
 local loaded, unloaded = 0, 0
 TerrainGenerator.ChunkLoaded:Connect(function() loaded += 1 end)
 TerrainGenerator.ChunkUnloaded:Connect(function() unloaded += 1 end)
@@ -76,4 +89,18 @@ print("WorldToChunk(-1,0,64):", cx, cz, "WorldToBlock:", TerrainGenerator.WorldT
 local n = 0
 for _, f in workspace:FindFirstChild("GeneratedCollectables"):GetChildren() do n += #f:GetChildren() end
 print("collectable parts alive:", n)
+-- structures: built for loaded origin chunks, removed with them
+assert(builds > 0, "no structure was built")
+assert(lastCtx.Name == "Test" and lastCtx.Position.Y > 0 and lastCtx.Rotation % 90 == 0 and lastCtx.Chunk.X ~= nil and lastCtx.Parent ~= nil and type(lastCtx.Seed) == "number" and lastCtx.Random ~= nil, "bad ctx")
+local root = workspace:FindFirstChild("GeneratedStructures")
+local alive = 0
+for _, f in root:GetChildren() do
+	local sx, sz = string.match(f.Name, "^Test_(-?%d+)_(-?%d+)$")
+	assert(sx, "unexpected structure folder " .. f.Name)
+	assert(TerrainGenerator.IsChunkLoaded(tonumber(sx), tonumber(sz)), "structure of an unloaded chunk is still alive: " .. f.Name)
+	assert(#f:GetChildren() == 1, "structure content missing")
+	alive += 1
+end
+assert(alive > 0)
+print("structures built:", builds, "alive:", alive, "(all belong to loaded chunks)")
 print("start_local OK")

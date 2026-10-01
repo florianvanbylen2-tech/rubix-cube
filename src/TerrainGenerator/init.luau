@@ -15,6 +15,9 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local Config = require(script.Config)
 local ChunkManager = require(script.Streaming.ChunkManager)
 local ChunkWriter = require(script.Streaming.ChunkWriter)
+local StructureBuilder = require(script.Streaming.StructureBuilder)
+local LoadGovernor = require(script.Streaming.LoadGovernor)
+local Structures = require(script.World.Structures)
 local ChunkGenerator = require(script.World.ChunkGenerator)
 local Queries = require(script.World.Queries)
 local Settings = require(script.Data.Settings)
@@ -40,6 +43,8 @@ initialEvent, TerrainGenerator.InitialAreaLoaded = newSignal() -- () the Width x
 spawnEvent, TerrainGenerator.SpawnAreaReady = newSignal() -- () characters can spawn
 
 local customBiomes: { any } = {}
+local structureDefs: { [string]: any } = {} -- full user definitions (Model / Build / Offset live here, main thread only)
+local structurePlacement: { any } = {} -- the plain-data part, sent to the workers
 local started = false
 local initialLoaded = false
 local spawnReady = false
@@ -64,6 +69,7 @@ local function generatorOptions(): any
 		oreDensity = Config.Collectables.OreDensity,
 		oreTiers = Config.Collectables.OreTiers,
 		smooth = Config.SmoothTerrain,
+		structures = Config.Structures.Enabled and structurePlacement or nil,
 	}
 end
 
@@ -82,7 +88,7 @@ end
 
 -- A generator instance on the calling thread, only for read-only queries (biome / height lookups).
 local function getQueryGenerator(): any
-	local key = tostring(Config.Seed) .. "|" .. #customBiomes
+	local key = tostring(Config.Seed) .. "|" .. #customBiomes .. "|" .. #structurePlacement
 	if queryGen == nil or queryKey ~= key then
 		queryGen = ChunkGenerator.new(Config.Seed, generatorOptions())
 		queryKey = key
@@ -156,6 +162,28 @@ function TerrainGenerator.RegisterBiome(definition: any)
 	local def = table.clone(definition)
 	def.base = def.base or "plains"
 	table.insert(customBiomes, def)
+end
+
+-- ---------------------------------------------------------------------------------------- structures
+-- Registers a structure. Call before Start(). See Examples/Structures.luau for a complete example.
+--   Name        unique string
+--   Spacing     chunks between structure cells (default 24; 1 chunk = 64 studs); Separation (default Spacing/3)
+--               is the minimum gap in chunks between two of this kind
+--   Chance      0..1 per cell (default 1)         Salt   number that reshuffles the layout (default 0)
+--   Biomes      list of biome names ("plains", "desert", custom biome ids...); nil = any
+--   Placement   "Land" (default) | "Water" | "Any"          MaxSlope  max ground height difference, blocks (4)
+--   Rotate      random 90 degree turns (default true)       Offset    Vector3 studs added to the ground point
+--   Model       Instance (Model/BasePart) cloned onto the ground, bottom of its bounding box on the surface
+--   Build       function(ctx) called on the server for every placed structure; parent what you create to
+--               ctx.Parent. ctx: Name, Position, CFrame, Rotation, Seed, Random, Biome, Chunk, Parent, Terrain, Model
+-- A structure lives as long as its origin chunk is loaded and is generated again (identically) when it reloads.
+function TerrainGenerator.RegisterStructure(definition: any)
+	assert(not started, "RegisterStructure must be called before TerrainGenerator.Start()")
+	local placement = Structures.normalize(definition)
+	assert(structureDefs[placement.Name] == nil, "duplicate structure " .. placement.Name)
+	assert(definition.Model ~= nil or definition.Build ~= nil, placement.Name .. ": give the structure a Model or a Build function")
+	structureDefs[placement.Name] = definition
+	table.insert(structurePlacement, placement)
 end
 
 -- ---------------------------------------------------------------------------------------- streaming state
@@ -265,14 +293,22 @@ local function startInner()
 	local actors: { Actor } = {}
 	local localGenerator: any = nil
 	local localWriter: any = nil
+	local builder: any = nil
+	if cfg.Structures.Enabled and #structurePlacement > 0 then
+		builder = StructureBuilder.new(structureDefs, cfg.Structures.FolderName, baseY())
+	end
 
 	local function report(kind: string, ...)
 		if kind == "done" then
-			local jobId, cx, cz, ok, err = ...
+			local jobId, cx, cz, ok, err, structures = ...
 			local w = jobWorker[jobId]
 			if w then
 				inflightBy[w] -= 1
 				jobWorker[jobId] = nil
+			end
+			-- build before onDone: if the chunk was cancelled meanwhile, onDone unloads it and removes the build
+			if ok and builder and structures then
+				builder:build(cx, cz, structures)
 			end
 			manager:onDone(jobId, cx, cz, ok, err)
 		end
@@ -300,9 +336,19 @@ local function startInner()
 			else
 				task.spawn(function()
 					task.wait()
+					local sliceStart = os.clock()
+					local sliceSeconds = cfg.Workers.SliceMs / 1000
 					local ok, err = pcall(function()
-						local chunk = localGenerator:generate(cx, cz)
+						local chunk = localGenerator:generate(cx, cz, function()
+							if os.clock() - sliceStart >= sliceSeconds then
+								task.wait()
+								sliceStart = os.clock()
+							end
+						end)
 						localWriter:write(chunk)
+						if builder and chunk.structures then
+							builder:build(cx, cz, chunk.structures)
+						end
 					end)
 					manager:onDone(jobId, cx, cz, ok, err and tostring(err) or nil)
 				end)
@@ -310,6 +356,9 @@ local function startInner()
 		end,
 		unload = function(cx: number, cz: number)
 			writer:unload(cx, cz)
+			if builder then
+				builder:unload(cx, cz)
+			end
 			chunkUnloadedEvent:Fire(cx, cz)
 		end,
 		onLoaded = function(cx: number, cz: number)
@@ -395,12 +444,17 @@ local function startInner()
 	end)
 
 	local accumulator = 0
+	local jobCap: number = manager.maxInFlight
+	local governor = LoadGovernor.new(jobCap, cfg.Streaming.TargetFrameMs / 1000)
 	heartbeat = RunService.Heartbeat:Connect(function(dt: number)
+		governor:sample(dt)
 		accumulator += dt
 		if accumulator < cfg.Streaming.UpdateInterval then
 			return
 		end
 		accumulator = 0
+		-- before players can spawn nobody is playing, so generate at full speed; afterwards protect the frame rate
+		manager.maxInFlight = if cfg.Streaming.AdaptiveLoad and spawnReady then governor:step() else jobCap
 		for _, player in Players:GetPlayers() do
 			local id = tostring(player.UserId)
 			local character = player.Character

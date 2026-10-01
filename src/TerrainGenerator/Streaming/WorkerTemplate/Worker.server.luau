@@ -7,7 +7,7 @@
 --   "Init"     settings                    build the world generator (parallel), then acknowledge
 --   "Generate" jobId, chunkX, chunkZ       generate the chunk in parallel, write it in the serial phase,
 --                                          then report to the main thread through the Done event
--- worker -> main (BindableEvent "Events"):  ("bound") / ("ready", actorName) / ("done", jobId, cx, cz, ok, err)
+-- worker -> main (BindableEvent "Events"):  ("bound") / ("ready", actorName) / ("done", jobId, cx, cz, ok, err, structures)
 
 local actor = script:GetActor()
 if actor == nil then
@@ -88,6 +88,7 @@ actor:BindToMessageParallel("Generate", function(jobId: number, cx: number, cz: 
 	release()
 	task.synchronize()
 	local err: string? = nil
+	local structures = ok and result.structures or nil
 	if ok then
 		local wok, werr = pcall(function()
 			writer:write(result)
@@ -98,7 +99,7 @@ actor:BindToMessageParallel("Generate", function(jobId: number, cx: number, cz: 
 	else
 		err = tostring(result)
 	end
-	events:Fire("done", jobId, cx, cz, ok, err)
+	events:Fire("done", jobId, cx, cz, ok, err, structures)
 end)
 
 events:Fire("bound", actor.Name)

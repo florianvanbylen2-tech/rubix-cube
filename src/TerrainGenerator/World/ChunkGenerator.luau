@@ -10,6 +10,7 @@ local BiomeSource = require(script.Parent.BiomeSource)
 local SurfaceSystem = require(script.Parent.SurfaceSystem)
 local Carvers = require(script.Parent.Carvers)
 local Features = require(script.Parent.Features)
+local Structures = require(script.Parent.Structures)
 
 local HEIGHT = Settings.height
 
@@ -25,13 +26,14 @@ export type Chunk = {
 	aquifer: any?,
 	carvedList: { number }?,
 	collectables: { any },
+	structures: { any }?, -- placements whose origin is this chunk (see World/Structures)
 }
 
 local ChunkGenerator = {}
 ChunkGenerator.__index = ChunkGenerator
 
 -- seed: number or string; options.customBiomes: { BiomeRegistry.Custom }
-function ChunkGenerator.new(seed: number | string, options: { customBiomes: { any }?, treeDensity: number?, oreDensity: number?, oreTiers: { [string]: number }?, smooth: boolean? }?)
+function ChunkGenerator.new(seed: number | string, options: { customBiomes: { any }?, treeDensity: number?, oreDensity: number?, oreTiers: { [string]: number }?, smooth: boolean?, structures: { any }? }?)
 	local sh, sl = RandomState.seedFrom(seed)
 	local rs = RandomState.new(sh, sl)
 	local sampler = Compiler.compile(rs)
@@ -47,6 +49,9 @@ function ChunkGenerator.new(seed: number | string, options: { customBiomes: { an
 	setmetatable(self, ChunkGenerator)
 	self.surface = SurfaceSystem.new(self)
 	self.features = Features.new(self, options)
+	if options and options.structures and #options.structures > 0 then
+		self.structures = Structures.new(self, options.structures)
+	end
 	return self
 end
 
@@ -116,6 +121,9 @@ function ChunkGenerator.generate(self: any, cx: number, cz: number, yieldFn: (()
 		yieldFn()
 	end
 	Features.generate(self.features, chunk)
+	if self.structures then
+		chunk.structures = Structures.place(self.structures, chunk)
+	end
 	chunk.aquifer = nil
 	return chunk
 end
