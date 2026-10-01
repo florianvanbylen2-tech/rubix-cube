@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>disable</Nullable>
+    <AssemblyName>TiaBridge</AssemblyName>
+    <RootNamespace>TiaBridge</RootNamespace>
+    <!-- Pad naar de Openness-DLL. Overschrijfbaar: dotnet build -p:TiaOpennessDll="D:\...\Siemens.Engineering.dll" -->
+    <TiaOpennessDll Condition="'$(TiaOpennessDll)' == ''">C:\Program Files\Siemens\Automation\Portal V19\PublicAPI\V19\net48\Siemens.Engineering.dll</TiaOpennessDll>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="Siemens.Engineering">
+      <HintPath>$(TiaOpennessDll)</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>
