@@ -219,19 +219,19 @@ namespace TiaBridge
         }
 
         // ---------- LAD ----------
-        private static JToken GetLadTemplate(JObject a)
+        private static JToken GetFbdTemplate(JObject a)
         {
             var plc = PlcOf(a);
             var name = Str(a, "blockName");
             PlcBlock block = null;
             if (!string.IsNullOrEmpty(name)) block = FindAnywhere(plc.BlockGroup, name);
-            else block = AllBlocks(plc.BlockGroup).FirstOrDefault(b => b.ProgrammingLanguage == ProgrammingLanguage.LAD);
+            else block = AllBlocks(plc.BlockGroup).FirstOrDefault(b => b.ProgrammingLanguage == ProgrammingLanguage.FBD);
             if (block == null)
                 return new JObject
                 {
                     ["found"] = false,
-                    ["note"] = "Geen LAD-blok in het project. Maak in TIA een FC met één netwerk (contact -> coil) en een FB-aanroep, of gebruik build_lad_block; onderstaande XML is door onze eigen generator gemaakt en NIET tegen TIA geverifieerd.",
-                    ["xml"] = LadBuilder.SampleXml()
+                    ["note"] = "Geen FBD-blok in het project. Maak in TIA een FC met één FBD-netwerk (AND-box -> toewijzing) en een FB-aanroep, of gebruik build_fbd_block; onderstaande XML is door onze eigen generator gemaakt en NIET tegen TIA geverifieerd.",
+                    ["xml"] = FbdBuilder.SampleXml()
                 };
             var dir = NewTempDir();
             try
@@ -250,19 +250,19 @@ namespace TiaBridge
                 foreach (var b in AllBlocks(sub)) yield return b;
         }
 
-        private static JToken BuildLadBlock(JObject a)
+        private static JToken BuildFbdBlock(JObject a)
         {
             var spec = a["spec"] as JObject;
             if (spec == null) throw new ArgumentException("spec (JSON-beschrijving van het blok) is verplicht.");
-            var xml = LadBuilder.BuildBlockXml(spec);
+            var xml = FbdBuilder.BuildBlockXml(spec);
             if (!Flag(a, "import")) return new JObject { ["xml"] = xml, ["imported"] = false };
-            var res = (JObject)Write(a, "build_lad_block", plc => ImportXml(plc, xml, Flag(a, "overwrite"), Str(a, "groupPath")));
+            var res = (JObject)Write(a, "build_fbd_block", plc => ImportXml(plc, xml, Flag(a, "overwrite"), Str(a, "groupPath")));
             res["imported"] = true;
             res["xml"] = xml;
             return res;
         }
 
-        /// <summary>Exporteert een bestaand LAD-blok (bv. Main), voegt netwerken toe en importeert met Override.</summary>
+        /// <summary>Exporteert een bestaand FBD-blok (bv. Main), voegt netwerken toe en importeert met Override.</summary>
         private static JToken AppendNetworks(JObject a)
         {
             var name = Str(a, "blockName");
@@ -280,7 +280,7 @@ namespace TiaBridge
                     var file = new FileInfo(Path.Combine(dir, "b.xml"));
                     block.Export(file, ExportOptions.WithDefaults);
                     var doc = XDocument.Load(file.FullName);
-                    var xml = LadBuilder.AppendNetworks(doc, nets);
+                    var xml = FbdBuilder.AppendNetworks(doc, nets);
                     var path = GroupPathOf(plc.BlockGroup, block);
                     return ImportXml(plc, xml, true, path);
                 }

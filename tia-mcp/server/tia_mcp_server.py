@@ -150,30 +150,32 @@ def compile_plc(maxMessages: Optional[int] = None, plcName: Optional[str] = None
 
 
 @mcp.tool()
-def get_lad_template(blockName: Optional[str] = None, plcName: Optional[str] = None) -> dict:
-    """Exporteert een bestaand LAD-blok als voorbeeld van de exacte V19-XML (zonder blockName: eerste LAD-blok)."""
-    return bridge.call("get_lad_template", blockName=blockName, plcName=plcName)
+def get_fbd_template(blockName: Optional[str] = None, plcName: Optional[str] = None) -> dict:
+    """Exporteert een bestaand FBD-blok als voorbeeld van de exacte V19-XML (zonder blockName: eerste FBD-blok)."""
+    return bridge.call("get_fbd_template", blockName=blockName, plcName=plcName)
 
 
 @mcp.tool()
-def build_lad_block(spec: Dict[str, Any], importIntoPlc: bool = False, overwrite: bool = False,
+def build_fbd_block(spec: Dict[str, Any], importIntoPlc: bool = False, overwrite: bool = False,
                     groupPath: Optional[str] = None, plcName: Optional[str] = None) -> dict:
-    """Zet een JSON-beschrijving van een LAD-blok om naar SimaticML en importeert die optioneel.
+    """Zet een JSON-beschrijving van een FBD-blok om naar SimaticML en importeert die optioneel.
     spec: {type: FC|FB|OB, name, number, interface: {Input|Output|InOut|Static|Temp|Constant: [{name,type,start?}]},
-           networks: [{title?, comment?, logic: [...]}]}.
-    Elementen in logic (in serie, van links naar rechts; coils komen aan het eind):
-      {type:contact, kind:NO|NC, operand}        {type:compare, op:==|<>|<|<=|>|>=, dataType, in1, in2}
-      {type:move, in, out, dataType?}            {type:call, name, blockType:FC|FB, instance?, params:[{name,section,type,value}]}
-      {type:coil, kind:coil|set|reset|negcoil, operand}
-    Operanden: '#lokaal', '"Tag"', '"DB"."Member"', of een literal (5, 2.5, TRUE, T#5s). Zie docs/simaticml-lad.md."""
-    return bridge.call("build_lad_block", spec=spec, **{"import": importIntoPlc}, overwrite=overwrite,
+           networks: [{title?, comment?, logic: [statements]}]}.
+    Statements:
+      {type:assign, operand | operands:[..], kind:assign|set|reset|negassign, expr}
+      {type:move, in, out, dataType?, en?}
+      {type:call, name, blockType:FC|FB, instance?, en?, params:[{name,section,type,value}]}
+    expr (boom): {operand:"#x"} | {and:[expr..]} | {or:[..]} | {xor:[..]} | {cmp:{op,dataType,in1,in2}};
+      elk knooppunt mag neg:true krijgen (negatie op die ingang). Een kale string "#x" is een operand.
+    Operanden: '#lokaal', '"Tag"', '"DB"."Member"', of literal (5, 2.5, TRUE, T#5s). Zie docs/simaticml-fbd.md."""
+    return bridge.call("build_fbd_block", spec=spec, **{"import": importIntoPlc}, overwrite=overwrite,
                        groupPath=groupPath, plcName=plcName)
 
 
 @mcp.tool()
 def append_networks(blockName: str, networks: List[Dict[str, Any]], overwrite: bool = False,
                     plcName: Optional[str] = None) -> dict:
-    """Voegt LAD-netwerken (zelfde formaat als build_lad_block) toe aan een bestaand LAD/FBD-blok, bv. 'Main'.
+    """Voegt FBD-netwerken (zelfde formaat als build_fbd_block) toe aan een bestaand FBD-blok, bv. 'Main'.
     Exporteert het blok, voegt toe en importeert met Override: overwrite=true is verplicht."""
     return bridge.call("append_networks", blockName=blockName, networks=networks, overwrite=overwrite, plcName=plcName)
 

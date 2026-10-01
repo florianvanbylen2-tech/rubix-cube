@@ -33,8 +33,8 @@ namespace TiaBridge
                 case "create_instance_db": return CreateInstanceDb(a);
                 case "import_block_xml": return ImportBlockXml(a);
                 case "compile_plc": return CompilePlc(a);
-                case "get_lad_template": return GetLadTemplate(a);
-                case "build_lad_block": return BuildLadBlock(a);
+                case "get_fbd_template": return GetFbdTemplate(a);
+                case "build_fbd_block": return BuildFbdBlock(a);
                 case "append_networks": return AppendNetworks(a);
                 default: throw new InvalidOperationException("Onbekend commando: " + cmd);
             }
