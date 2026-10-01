@@ -13,7 +13,7 @@ async def main():
         async with ClientSession(r, w) as s:
             await s.initialize()
             tools = [t.name for t in (await s.list_tools()).tools]
-            assert tools == ["get_project_info", "list_blocks", "read_block"], tools
+            assert len(tools) == 17 and "compile_plc" in tools and "append_networks" in tools, tools
             out = await s.call_tool("list_blocks", {})
             assert "Main" in out.content[0].text, out
             out = await s.call_tool("read_block", {"name": "Main"})

@@ -12,7 +12,7 @@ using Siemens.Engineering.SW.Blocks;
 
 namespace TiaBridge
 {
-    internal static class Commands
+    internal static partial class Commands
     {
         public static JToken Dispatch(string cmd, JObject a)
         {
@@ -22,6 +22,20 @@ namespace TiaBridge
                 case "get_project_info": return GetProjectInfo(a);
                 case "list_blocks": return ListBlocks(a);
                 case "read_block": return ReadBlock(a);
+                case "list_tag_tables": return ListTagTables(a);
+                case "read_tag_table": return ReadTagTable(a);
+                case "list_types": return ListTypes(a);
+                case "read_type": return ReadType(a);
+                case "create_tag_table": return CreateTagTable(a);
+                case "upsert_tags": return UpsertTags(a);
+                case "create_udt": return CreateFromSource(a, "udt");
+                case "create_global_db": return CreateFromSource(a, "db");
+                case "create_instance_db": return CreateInstanceDb(a);
+                case "import_block_xml": return ImportBlockXml(a);
+                case "compile_plc": return CompilePlc(a);
+                case "get_lad_template": return GetLadTemplate(a);
+                case "build_lad_block": return BuildLadBlock(a);
+                case "append_networks": return AppendNetworks(a);
                 default: throw new InvalidOperationException("Onbekend commando: " + cmd);
             }
         }

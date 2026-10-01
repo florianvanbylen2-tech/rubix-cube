@@ -4,7 +4,7 @@ import os
 import subprocess
 import sys
 import threading
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
 
@@ -80,6 +80,102 @@ def read_block(name: str, plcName: Optional[str] = None, maxChars: Optional[int]
     """Exporteert een blok als SimaticML-XML en geeft die terug.
     name: 'Main' of een pad als 'Groep/Sub/FB_Motor'."""
     return bridge.call("read_block", name=name, plcName=plcName, maxChars=maxChars, processId=processId)
+
+
+@mcp.tool()
+def list_tag_tables(plcName: Optional[str] = None) -> dict:
+    """Alle tag tables met naam, groep en aantal tags."""
+    return bridge.call("list_tag_tables", plcName=plcName)
+
+
+@mcp.tool()
+def read_tag_table(name: str, plcName: Optional[str] = None) -> dict:
+    """Tags van een tag table: naam, datatype, adres, commentaar."""
+    return bridge.call("read_tag_table", name=name, plcName=plcName)
+
+
+@mcp.tool()
+def create_tag_table(name: str, plcName: Optional[str] = None) -> dict:
+    """Maakt een tag table aan (of geeft de bestaande terug)."""
+    return bridge.call("create_tag_table", name=name, plcName=plcName)
+
+
+@mcp.tool()
+def upsert_tags(tableName: str, tags: List[Dict[str, Any]], plcName: Optional[str] = None) -> dict:
+    """tags: lijst van {name, dataType, address, comment}. Maakt tags aan of werkt ze bij."""
+    return bridge.call("upsert_tags", tableName=tableName, tags=tags, plcName=plcName)
+
+
+@mcp.tool()
+def list_types(plcName: Optional[str] = None) -> dict:
+    """Alle UDT's (PLC data types)."""
+    return bridge.call("list_types", plcName=plcName)
+
+
+@mcp.tool()
+def read_type(name: str, plcName: Optional[str] = None) -> dict:
+    """Exporteert een UDT als XML."""
+    return bridge.call("read_type", name=name, plcName=plcName)
+
+
+@mcp.tool()
+def create_udt(source: str, overwrite: bool = False, plcName: Optional[str] = None) -> dict:
+    """UDT vanuit SCL-brontekst (TYPE "naam" ... END_TYPE). Bestaande naam alleen met overwrite=true."""
+    return bridge.call("create_udt", source=source, overwrite=overwrite, plcName=plcName)
+
+
+@mcp.tool()
+def create_global_db(source: str, overwrite: bool = False, plcName: Optional[str] = None) -> dict:
+    """Global DB vanuit brontekst (DATA_BLOCK "naam" ... END_DATA_BLOCK). Bestaande naam alleen met overwrite=true."""
+    return bridge.call("create_global_db", source=source, overwrite=overwrite, plcName=plcName)
+
+
+@mcp.tool()
+def create_instance_db(name: str, fbName: str, number: Optional[int] = None, plcName: Optional[str] = None) -> dict:
+    """Instance DB voor een bestaande FB. Zonder number wordt automatisch genummerd."""
+    return bridge.call("create_instance_db", name=name, fbName=fbName, number=number, plcName=plcName)
+
+
+@mcp.tool()
+def import_block_xml(xml: str, overwrite: bool = False, groupPath: Optional[str] = None,
+                     plcName: Optional[str] = None) -> dict:
+    """Importeert een FC/FB/OB als SimaticML-XML. Een bestaand blok wordt alleen vervangen met overwrite=true."""
+    return bridge.call("import_block_xml", xml=xml, overwrite=overwrite, groupPath=groupPath, plcName=plcName)
+
+
+@mcp.tool()
+def compile_plc(maxMessages: Optional[int] = None, plcName: Optional[str] = None) -> dict:
+    """Compileert de PLC-software en geeft status, aantallen en alle meldingen (fouten eerst) terug."""
+    return bridge.call("compile_plc", maxMessages=maxMessages, plcName=plcName)
+
+
+@mcp.tool()
+def get_lad_template(blockName: Optional[str] = None, plcName: Optional[str] = None) -> dict:
+    """Exporteert een bestaand LAD-blok als voorbeeld van de exacte V19-XML (zonder blockName: eerste LAD-blok)."""
+    return bridge.call("get_lad_template", blockName=blockName, plcName=plcName)
+
+
+@mcp.tool()
+def build_lad_block(spec: Dict[str, Any], importIntoPlc: bool = False, overwrite: bool = False,
+                    groupPath: Optional[str] = None, plcName: Optional[str] = None) -> dict:
+    """Zet een JSON-beschrijving van een LAD-blok om naar SimaticML en importeert die optioneel.
+    spec: {type: FC|FB|OB, name, number, interface: {Input|Output|InOut|Static|Temp|Constant: [{name,type,start?}]},
+           networks: [{title?, comment?, logic: [...]}]}.
+    Elementen in logic (in serie, van links naar rechts; coils komen aan het eind):
+      {type:contact, kind:NO|NC, operand}        {type:compare, op:==|<>|<|<=|>|>=, dataType, in1, in2}
+      {type:move, in, out, dataType?}            {type:call, name, blockType:FC|FB, instance?, params:[{name,section,type,value}]}
+      {type:coil, kind:coil|set|reset|negcoil, operand}
+    Operanden: '#lokaal', '"Tag"', '"DB"."Member"', of een literal (5, 2.5, TRUE, T#5s). Zie docs/simaticml-lad.md."""
+    return bridge.call("build_lad_block", spec=spec, **{"import": importIntoPlc}, overwrite=overwrite,
+                       groupPath=groupPath, plcName=plcName)
+
+
+@mcp.tool()
+def append_networks(blockName: str, networks: List[Dict[str, Any]], overwrite: bool = False,
+                    plcName: Optional[str] = None) -> dict:
+    """Voegt LAD-netwerken (zelfde formaat als build_lad_block) toe aan een bestaand LAD/FBD-blok, bv. 'Main'.
+    Exporteert het blok, voegt toe en importeert met Override: overwrite=true is verplicht."""
+    return bridge.call("append_networks", blockName=blockName, networks=networks, overwrite=overwrite, plcName=plcName)
 
 
 if __name__ == "__main__":
