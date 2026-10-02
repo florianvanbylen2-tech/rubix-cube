@@ -22,6 +22,14 @@ pip install -r ..\..\server\requirements.txt
 Ander DLL-pad: `dotnet build -c Release -p:TiaOpennessDll="D:\...\Siemens.Engineering.dll"`.
 Compileerfouten op API-namen = melden, dan pas ik die aan.
 
+## Handmatig een blok exporteren (zonder MCP)
+TIA Portal heeft **geen** Exporteren-knop voor blokken in de interface; SimaticML-export bestaat alleen via Openness. Met TIA open:
+```
+TiaBridge.exe --list
+TiaBridge.exe --export MotorTb MotorTb.xml
+```
+(`MotorTb` = blokweergavenaam; evt. `Groep/Sub/Blok`, en als 4e argument de PLC-naam.) Het bestand is de SimaticML-XML.
+
 ## Configuratie
 Claude Code:
 ```

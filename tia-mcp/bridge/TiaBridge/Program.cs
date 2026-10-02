@@ -16,10 +16,38 @@ namespace TiaBridge
         private static int Main(string[] argv)
         {
             Resolver.Install();                 // eerst de resolver, dan pas Openness-types aanraken
+            if (argv.Length > 0 && argv[0].StartsWith("--")) return Cli(argv);
             var protocolOut = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true };
             Console.SetOut(Console.Error);      // verdwaalde Console.WriteLine's mogen het protocol niet vervuilen
             var stdin = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false));
             return Loop(stdin, protocolOut);
+        }
+
+        /// <summary>Handmatig gebruik zonder MCP: TiaBridge.exe --list | --export NAAM [uitvoer.xml] [PLCNAAM]</summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static int Cli(string[] argv)
+        {
+            try
+            {
+                if (argv[0] == "--list")
+                {
+                    Console.Error.WriteLine(Commands.Dispatch("list_blocks", new JObject()).ToString());
+                    return 0;
+                }
+                if (argv[0] == "--export" && argv.Length >= 2)
+                {
+                    var args = new JObject { ["name"] = argv[1], ["maxChars"] = int.MaxValue };
+                    if (argv.Length >= 4) args["plcName"] = argv[3];
+                    var res = (JObject)Commands.Dispatch("read_block", args);
+                    var file = argv.Length >= 3 ? argv[2] : argv[1].Replace('/', '_') + ".xml";
+                    File.WriteAllText(file, (string)res["xml"], new UTF8Encoding(false));
+                    Console.Error.WriteLine("Geschreven: " + Path.GetFullPath(file));
+                    return 0;
+                }
+                Console.Error.WriteLine("Gebruik: TiaBridge.exe --list | --export BLOKNAAM [uitvoer.xml] [PLCNAAM]");
+                return 2;
+            }
+            catch (Exception ex) { Console.Error.WriteLine("FOUT: " + Commands.Describe(ex)); return 1; }
         }
 
         [MethodImpl(MethodImplOptions.NoInlining)]
