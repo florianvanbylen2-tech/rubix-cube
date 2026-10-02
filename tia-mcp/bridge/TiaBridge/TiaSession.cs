@@ -61,7 +61,7 @@ namespace TiaBridge
             var seen = new HashSet<string>();
             foreach (var d in project.Devices) if (seen.Add(d.Name)) yield return d;
             foreach (var d in GroupDevices(project.DeviceGroups)) if (seen.Add(d.Name)) yield return d;
-            DeviceUserGroup ungrouped = null;
+            DeviceSystemGroup ungrouped = null;
             try { ungrouped = project.UngroupedDevicesGroup; } catch { }
             if (ungrouped != null)
                 foreach (var d in ungrouped.Devices) if (seen.Add(d.Name)) yield return d;
