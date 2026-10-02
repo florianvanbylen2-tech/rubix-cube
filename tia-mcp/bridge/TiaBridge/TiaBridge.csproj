@@ -9,7 +9,7 @@
     <AssemblyName>TiaBridge</AssemblyName>
     <RootNamespace>TiaBridge</RootNamespace>
     <!-- Pad naar de Openness-DLL. Overschrijfbaar: dotnet build -p:TiaOpennessDll="D:\...\Siemens.Engineering.dll" -->
-    <TiaOpennessDll Condition="'$(TiaOpennessDll)' == ''">C:\Program Files\Siemens\Automation\Portal V19\PublicAPI\V19\net48\Siemens.Engineering.dll</TiaOpennessDll>
+    <TiaOpennessDll Condition="'$(TiaOpennessDll)' == ''">C:\Program Files\Siemens\Automation\Portal V19\PublicAPI\V19\Siemens.Engineering.dll</TiaOpennessDll>
   </PropertyGroup>
 
   <ItemGroup>

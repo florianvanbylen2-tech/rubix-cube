@@ -12,8 +12,12 @@ namespace TiaBridge
     internal static class Resolver
     {
         // Hardcoded fallback voor V19.
-        private const string FallbackDir =
-            @"C:\Program Files\Siemens\Automation\Portal V19\PublicAPI\V19\net48";
+        // Gecontroleerd op een echte V19-installatie: de DLL staat direct in ...\PublicAPI\V19 (geen net48-submap).
+        private static readonly string[] FallbackDirs =
+        {
+            @"C:\Program Files\Siemens\Automation\Portal V19\PublicAPI\V19",
+            @"C:\Program Files\Siemens\Automation\Portal V19\PublicAPI\V19\net48"
+        };
 
         public static string ResolvedPath { get; private set; }
 
@@ -63,7 +67,9 @@ namespace TiaBridge
                 }
             }
             catch { /* val terug op hardcoded pad */ }
-            return FallbackDir;
+            foreach (var d in FallbackDirs)
+                if (File.Exists(Path.Combine(d, "Siemens.Engineering.dll"))) return d;
+            return FallbackDirs[0];
         }
     }
 }

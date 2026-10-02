@@ -11,7 +11,7 @@ Tools: `get_project_info`, `list_blocks`, `read_block`, `list_tag_tables`, `read
 ## Vereisten
 - Windows, TIA Portal V19 met een project open, Python 3.10+, .NET SDK (voor `dotnet build`).
 - Gebruiker in de Windows-groep **Siemens TIA Openness** (opnieuw inloggen na toevoegen). `get_project_info` meldt of dit klopt.
-- `C:\Program Files\Siemens\Automation\Portal V19\PublicAPI\V19\net48\Siemens.Engineering.dll`
+- `C:\Program Files\Siemens\Automation\Portal V19\PublicAPI\V19\Siemens.Engineering.dll`
 
 ## Bouwen
 ```
