@@ -5,7 +5,7 @@
 -- priority first). A biome applies when the vanilla climate values at that cell fall inside its `climate` ranges
 -- AND its optional `region` noise is above its threshold; otherwise the vanilla biome is used. `base` names the
 -- vanilla biome it inherits surface rules, carvers and features from. `surface` re-skins the top soil layers,
--- `trees` / `ores` add extra collectables (Tree / Ore_N parts).
+-- `trees` / `ores` add extra things (placed through placeThing under their title-cased name).
 --
 -- Climate values are the -1..1 numbers Minecraft uses (temperature, humidity, continentalness, erosion,
 -- weirdness, depth). GetClimateAt(position) shows the values at any spot, handy for tuning.
@@ -20,7 +20,7 @@ return {
 		priority = 2,
 		surface = { top = "calcite", filler = "calcite", fillerDepth = 2 },
 		trees = { { species = "crystal_tree", perChunk = 2 } },
-		ores = { { name = "mana_crystal", tier = 4, perChunk = 1.5, minY = -16, maxY = 60, size = 6 } },
+		ores = { { name = "mana_crystal", perChunk = 1.5, minY = -16, maxY = 60, size = 6 } },
 	},
 	{
 		id = "enchanted_marsh",
@@ -40,6 +40,6 @@ return {
 		region = { scale = 900, threshold = 0.55 },
 		priority = 1,
 		surface = { top = "gravel", filler = "tuff", fillerDepth = 4 },
-		ores = { { name = "ember_shard", tier = 5, perChunk = 0.7, minY = -32, maxY = 40, size = 4 } },
+		ores = { { name = "ember_shard", perChunk = 0.7, minY = -32, maxY = 40, size = 4 } },
 	},
 }

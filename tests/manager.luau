@@ -1,4 +1,5 @@
 local ChunkManager = require(TG.Streaming.ChunkManager)
+local LockRegistry = require(TG.Streaming.LockRegistry)
 
 local function key(cx, cz) return cx .. "," .. cz end
 
@@ -21,6 +22,9 @@ local function newHarness(opts, seed)
 				if cx >= s.cx - r and cx <= s.cx + r - 1 and cz >= s.cz - rz and cz <= s.cz + rz - 1 then
 					table.insert(H.violations, string.format("unloaded %s while source %s wants it", key(cx, cz), id))
 				end
+			end
+			if H.mgr.locked[LockRegistry.key(cx, cz)] then
+				table.insert(H.violations, string.format("unloaded %s while it is locked", key(cx, cz)))
 			end
 			H.world[key(cx, cz)] = nil
 		end,
@@ -194,4 +198,80 @@ do
 		check(st.inflight == 0 and st.queued == 0, "seed " .. seed .. ": jobs left over")
 	end
 	print("7. fuzz (30 seeds x 6 players x 250 steps, join/leave/teleport/random completion order): ok, no violations")
+end
+
+-- 8. locks: far-away locked chunks load, survive every player leaving, and release on unlock
+do
+	local H = newHarness({ radius = 2, margin = 1, maxInFlight = 4, maxDelay = 4 })
+	local locks = LockRegistry.new(function() H.mgr:setLocked(H.locks:union()) end)
+	H.locks = locks
+	H.mgr:setPlayer("a", 0, 0); H.mgr:update()
+	locks:lockArea(500, 500, 502, 501)         -- 3x2 chunks nobody is near
+	locks:lockChunk(-300, 20, "scriptB")
+	H.settle(120)
+	for x = 500, 502 do for z = 500, 501 do check(H.world[key(x, z)], "locked far chunk not loaded " .. key(x, z)) end end
+	check(H.world[key(-300, 20)], "locked chunk of another owner not loaded")
+	check(loadedSet(H) == 16 + 6 + 1, "window + locks expected (23), have " .. loadedSet(H))
+	-- the player leaves: only locks remain
+	H.mgr:removePlayer("a"); H.settle(60)
+	check(loadedSet(H) == 7, "after the player left, only the 7 locked chunks remain, have " .. loadedSet(H))
+	-- two owners on one chunk: it stays until BOTH release
+	locks:lockChunk(-300, 20, "scriptC")
+	locks:unlockChunk(-300, 20, "scriptB"); H.settle(30)
+	check(H.world[key(-300, 20)], "chunk unloaded while a second owner still locks it")
+	locks:unlockChunk(-300, 20, "scriptC"); H.settle(30)
+	check(not H.world[key(-300, 20)], "chunk should unload when the last lock is gone")
+	check(not locks:isLocked(-300, 20) and locks:isLocked(501, 500), "isLocked wrong")
+	locks:unlockAll(); H.settle(40)
+	check(loadedSet(H) == 0, "unlockAll should release the default owner's chunks")
+	check(#H.violations == 0, table.concat(H.violations, "; "))
+	print("8. locks: ok (far chunks load, survive player leaving, owners independent, unlock releases)")
+end
+
+-- 9. lock encode/decode round trip, including negative coordinates and multi-part splitting
+do
+	local set = {}
+	local n = 0
+	math.randomseed(7)
+	for _ = 1, 3000 do
+		local x, z = math.random(-300, 300), math.random(-40, 40)
+		if not set[LockRegistry.key(x, z)] then set[LockRegistry.key(x, z)] = true; n += 1 end
+	end
+	for x = -50, 50 do for z = -3, 3 do if not set[LockRegistry.key(x, z)] then set[LockRegistry.key(x, z)] = true; n += 1 end end end
+	local parts = LockRegistry.encode(set)
+	local back = LockRegistry.decode(parts)
+	local m = 0
+	for k in back do check(set[k], "decoded a chunk that was not locked") m += 1 end
+	check(m == n, "decoded count differs: " .. m .. " vs " .. n)
+	check(#LockRegistry.encode({}) == 0 and next(LockRegistry.decode({})) == nil, "empty set")
+	print("9. lock encoding: ok (" .. n .. " chunks in " .. #parts .. " part(s), " .. #table.concat(parts) .. " chars)")
+end
+
+-- 10. fuzz with locks: random lock / unlock while players wander
+do
+	for seed = 1, 20 do
+		local H = newHarness({ radius = 3, margin = 1, maxInFlight = 5, maxDelay = 5, playerGrace = 3 }, 100 + seed)
+		H.locks = LockRegistry.new(function() H.mgr:setLocked(H.locks:union()) end)
+		local pos = { p1 = { 0, 0 }, p2 = { 10, 10 } }
+		local owners = { "a", "b", "c" }
+		for step = 1, 250 do
+			for id, p in pos do
+				if math.random() < 0.05 then pos[id] = { math.random(-40, 40), math.random(-40, 40) } else p[1] += math.random(-1, 1); p[2] += math.random(-1, 1) end
+				H.mgr:setPlayer(id, pos[id][1], pos[id][2])
+			end
+			local r = math.random()
+			local o = owners[math.random(#owners)]
+			local ax, az = math.random(-60, 60), math.random(-60, 60)
+			if r < 0.10 then H.locks:lockArea(ax, az, ax + math.random(0, 3), az + math.random(0, 3), o)
+			elseif r < 0.20 then H.locks:unlockArea(ax, az, ax + math.random(0, 5), az + math.random(0, 5), o)
+			elseif r < 0.23 then H.locks:unlockAll(o) end
+			H.step()
+		end
+		H.settle(400)
+		check(#H.violations == 0, "seed " .. seed .. ": " .. table.concat(H.violations, "; "))
+		for k in H.locks:union() do local cx, cz = LockRegistry.unkey(k); check(H.world[key(cx, cz)], "seed " .. seed .. ": locked chunk missing") end
+		local st = H.mgr:stats()
+		check(st.loaded == loadedSet(H) and st.inflight == 0 and st.queued == 0, "seed " .. seed .. ": inconsistent")
+	end
+	print("10. lock fuzz (20 seeds, owners lock/unlock rectangles while 2 players move): ok")
 end

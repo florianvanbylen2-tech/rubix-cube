@@ -3,32 +3,35 @@
 --
 --   local TerrainGenerator = require(game.ServerScriptService.TerrainGenerator)
 --   TerrainGenerator.Config.Seed = "MyWorldName"      -- optional, see Config.luau
---   TerrainGenerator.Start()
+--   TerrainGenerator.Start()                          -- server; clients start themselves
 --   print(TerrainGenerator.GetBiomeAt(Vector3.new(0, 600, 0)))
 --
--- See README.md for the architecture and the full API.
+-- By default (Config.TerrainMode = "Client") every client draws its own terrain and the server only decides where
+-- trees, ores and structures go, calling Placement.placeThing for each. See README.md for the full API.
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local ServerScriptService = game:GetService("ServerScriptService")
+local StarterPlayer = game:GetService("StarterPlayer")
 
 local Config = require(script.Config)
-local ChunkManager = require(script.Streaming.ChunkManager)
-local ChunkWriter = require(script.Streaming.ChunkWriter)
-local StructureBuilder = require(script.Streaming.StructureBuilder)
-local LoadGovernor = require(script.Streaming.LoadGovernor)
-local Structures = require(script.World.Structures)
-local ChunkGenerator = require(script.World.ChunkGenerator)
+local Placement = require(script.Placement)
 local Queries = require(script.World.Queries)
+local ChunkGenerator = require(script.World.ChunkGenerator)
+local Structures = require(script.World.Structures)
 local Settings = require(script.Data.Settings)
+local LockRegistry = require(script.Streaming.LockRegistry)
+local Shared = require(script.Runtime.Shared)
+local Server = require(script.Runtime.Server)
+local Client = require(script.Runtime.Client)
+local Biomes = require(script.Data.Biomes)
 
 local MIN_Y = Settings.minY
-local HEIGHT = Settings.height
 local VOXEL = 4
 local CHUNK = 16 * VOXEL
 
 local TerrainGenerator = {}
-TerrainGenerator.Version = "1.0.0"
+TerrainGenerator.Version = "2.0.0"
 TerrainGenerator.Config = Config
 
 local function newSignal(): (BindableEvent, RBXScriptSignal)
@@ -36,64 +39,21 @@ local function newSignal(): (BindableEvent, RBXScriptSignal)
 	return e, e.Event
 end
 
-local chunkLoadedEvent, chunkUnloadedEvent, initialEvent, spawnEvent
-chunkLoadedEvent, TerrainGenerator.ChunkLoaded = newSignal() -- (chunkX, chunkZ)
-chunkUnloadedEvent, TerrainGenerator.ChunkUnloaded = newSignal() -- (chunkX, chunkZ)
-initialEvent, TerrainGenerator.InitialAreaLoaded = newSignal() -- () the Width x Length area around (0, 0) is complete
-spawnEvent, TerrainGenerator.SpawnAreaReady = newSignal() -- () characters can spawn
+local signals: any = {}
+signals.chunkLoaded, TerrainGenerator.ChunkLoaded = newSignal() -- (chunkX, chunkZ) loaded on this side (server: things; client: terrain)
+signals.chunkUnloaded, TerrainGenerator.ChunkUnloaded = newSignal() -- (chunkX, chunkZ)
+signals.initial, TerrainGenerator.InitialAreaLoaded = newSignal() -- () server: the area around the spawn point is generated
+signals.spawn, TerrainGenerator.SpawnAreaReady = newSignal() -- () the spawn area is ready (server side / this client)
 
 local customBiomes: { any } = {}
-local structureDefs: { [string]: any } = {} -- full user definitions (Model / Build / Offset live here, main thread only)
-local structurePlacement: { any } = {} -- the plain-data part, sent to the workers
-local started = false
-local initialLoaded = false
-local spawnReady = false
-
--- runtime state (set by Start)
-local manager: any = nil
-local writer: any = nil
-local heartbeat: RBXScriptConnection? = nil
-local container: Folder? = nil
+local locks = LockRegistry.new()
+local serverCtl: any = nil
+local clientCtl: any = nil
 local queryGen: any = nil
 local queryKey = ""
 
 local function baseY(): number
-	return math.floor(Config.BedrockLevel / VOXEL) * VOXEL
-end
-
--- ---------------------------------------------------------------------------------------- helpers
-local function generatorOptions(): any
-	return {
-		customBiomes = customBiomes,
-		treeDensity = Config.Collectables.TreeDensity,
-		oreDensity = Config.Collectables.OreDensity,
-		oreTiers = Config.Collectables.OreTiers,
-		smooth = Config.SmoothTerrain,
-		structures = Config.Structures.Enabled and structurePlacement or nil,
-	}
-end
-
-local function writerConfig(): any
-	return {
-		bedrockLevel = baseY(),
-		folderName = Config.Collectables.FolderName,
-		collectables = Config.Collectables.Enabled,
-		partSize = Config.Collectables.PartSize,
-		colorParts = Config.Collectables.ColorParts,
-		applyColors = Config.ApplyMaterialColors,
-		decoration = Config.Decoration,
-		writeBudgetMs = Config.Streaming.WriteBudgetMs,
-	}
-end
-
--- A generator instance on the calling thread, only for read-only queries (biome / height lookups).
-local function getQueryGenerator(): any
-	local key = tostring(Config.Seed) .. "|" .. #customBiomes .. "|" .. #structurePlacement
-	if queryGen == nil or queryKey ~= key then
-		queryGen = ChunkGenerator.new(Config.Seed, generatorOptions())
-		queryKey = key
-	end
-	return queryGen
+	return Shared.baseY(Config)
 end
 
 -- ---------------------------------------------------------------------------------------- coordinates
@@ -111,10 +71,19 @@ function TerrainGenerator.WorldToChunk(position: Vector3): (number, number)
 end
 
 -- ---------------------------------------------------------------------------------------- queries
+-- A generator instance on the calling thread, only for read-only queries (biome / height lookups).
+local function getQueryGenerator(): any
+	local key = tostring(Config.Seed) .. "|" .. #customBiomes .. "|" .. table.concat(Config.Biomes.Disabled, ",")
+	if queryGen == nil or queryKey ~= key then
+		queryGen = ChunkGenerator.new(Config.Seed, Shared.generatorOptions(Config, "query", customBiomes))
+		queryKey = key
+	end
+	return queryGen
+end
+
 -- Approximate surface height in studs (top of the highest solid block) at world position (x, z).
 function TerrainGenerator.GetHeightAt(x: number, z: number): number
-	local gen = getQueryGenerator()
-	local by = Queries.surfaceY(gen, math.floor(x / VOXEL), math.floor(z / VOXEL))
+	local by = Queries.surfaceY(getQueryGenerator(), math.floor(x / VOXEL), math.floor(z / VOXEL))
 	return baseY() + (by - MIN_Y + 1) * VOXEL
 end
 
@@ -151,10 +120,40 @@ function TerrainGenerator.GetClimateAt(position: Vector3): { [string]: number }
 	return Queries.climate(getQueryGenerator(), bx, by, bz)
 end
 
--- ---------------------------------------------------------------------------------------- custom biomes
+-- Every biome name (vanilla + registered custom ones), sorted.
+function TerrainGenerator.GetBiomeNames(): { string }
+	local names = {}
+	for name in Biomes do
+		table.insert(names, name)
+	end
+	for _, def in customBiomes do
+		table.insert(names, def.id)
+	end
+	table.sort(names)
+	return names
+end
+
+-- The names of all things that can be placed: { Trees = {...}, Ores = {...}, Structures = {...} } (sorted).
+function TerrainGenerator.GetThingNames(): { [string]: { string } }
+	local function keys(map: { [string]: any }): { string }
+		local out = {}
+		for k in map do
+			table.insert(out, k)
+		end
+		table.sort(out)
+		return out
+	end
+	return { Trees = keys(Config.Trees), Ores = keys(Config.Ores), Structures = keys(Config.Structures) }
+end
+
+-- ---------------------------------------------------------------------------------------- registering things
+local function assertNotStarted(what: string)
+	assert(serverCtl == nil and clientCtl == nil, what .. " must be called before TerrainGenerator.Start()")
+end
+
 -- Registers a "magical" biome (plain data, see World/BiomeRegistry.luau). Call before Start().
 function TerrainGenerator.RegisterBiome(definition: any)
-	assert(not started, "RegisterBiome must be called before TerrainGenerator.Start()")
+	assertNotStarted("RegisterBiome")
 	assert(type(definition) == "table" and type(definition.id) == "string", "biome definition needs a string `id`")
 	for _, existing in customBiomes do
 		assert(existing.id ~= definition.id, "duplicate biome id " .. definition.id)
@@ -164,382 +163,284 @@ function TerrainGenerator.RegisterBiome(definition: any)
 	table.insert(customBiomes, def)
 end
 
--- ---------------------------------------------------------------------------------------- structures
--- Registers a structure. Call before Start(). See Examples/Structures.luau for a complete example.
---   Name        unique string
---   Spacing     chunks between structure cells (default 24; 1 chunk = 64 studs); Separation (default Spacing/3)
---               is the minimum gap in chunks between two of this kind
---   Chance      0..1 per cell (default 1)         Salt   number that reshuffles the layout (default 0)
---   Biomes      list of biome names ("plains", "desert", custom biome ids...); nil = any
---   Placement   "Land" (default) | "Water" | "Any"          MaxSlope  max ground height difference, blocks (4)
---   Rotate      random 90 degree turns (default true)       Offset    Vector3 studs added to the ground point
---   Model       Instance (Model/BasePart) cloned onto the ground, bottom of its bounding box on the surface
---   Build       function(ctx) called on the server for every placed structure; parent what you create to
---               ctx.Parent. ctx: Name, Position, CFrame, Rotation, Seed, Random, Biome, Chunk, Parent, Terrain, Model
--- A structure lives as long as its origin chunk is loaded and is generated again (identically) when it reloads.
-function TerrainGenerator.RegisterStructure(definition: any)
-	assert(not started, "RegisterStructure must be called before TerrainGenerator.Start()")
-	local placement = Structures.normalize(definition)
-	assert(structureDefs[placement.Name] == nil, "duplicate structure " .. placement.Name)
-	assert(definition.Model ~= nil or definition.Build ~= nil, placement.Name .. ": give the structure a Model or a Build function")
-	structureDefs[placement.Name] = definition
-	table.insert(structurePlacement, placement)
+-- Removes a biome from the world: a registered custom biome is dropped, a vanilla one is disabled (its climate
+-- range goes to the nearest remaining biome). Call before Start().
+function TerrainGenerator.RemoveBiome(name: string)
+	assertNotStarted("RemoveBiome")
+	for i, def in customBiomes do
+		if def.id == name then
+			table.remove(customBiomes, i)
+			return
+		end
+	end
+	assert(Biomes[name] ~= nil, "unknown biome " .. tostring(name))
+	if not table.find(Config.Biomes.Disabled, name) then
+		table.insert(Config.Biomes.Disabled, name)
+	end
+end
+
+-- Undoes RemoveBiome for a vanilla biome. Call before Start().
+function TerrainGenerator.RestoreBiome(name: string)
+	assertNotStarted("RestoreBiome")
+	local i = table.find(Config.Biomes.Disabled, name)
+	if i then
+		table.remove(Config.Biomes.Disabled, i)
+	end
+end
+
+-- Adds a tree type that spawns in the listed biomes (nil = everywhere):
+--   RegisterTree({ Name = "Crystal Tree", Biomes = { "plains", "meadow" }, PerChunk = 2 })
+-- Rate / BiomeRate work like for the default trees. It reaches placeThing under its Name.
+function TerrainGenerator.RegisterTree(def: any)
+	assertNotStarted("RegisterTree")
+	assert(type(def) == "table" and type(def.Name) == "string" and def.Name ~= "", "tree needs a string `Name`")
+	assert(Config.Trees[def.Name] == nil, def.Name .. " already exists: edit Config.Trees[\"" .. def.Name .. "\"] instead")
+	Config.Trees[def.Name] = {
+		Enabled = def.Enabled ~= false, Custom = true, Biomes = def.Biomes, PerChunk = def.PerChunk or 1,
+		Rate = def.Rate or 1, BiomeRate = def.BiomeRate or {}, Extra = {},
+	}
+end
+
+-- Adds an ore: RegisterOre({ Name = "Mythril Ore", Biomes = nil, PerChunk = 1.5, MinY = -60, MaxY = 0, Size = 6 })
+-- MinY / MaxY are Minecraft block heights (-64 .. 319, sea level 63). One placeThing call per vein.
+function TerrainGenerator.RegisterOre(def: any)
+	assertNotStarted("RegisterOre")
+	assert(type(def) == "table" and type(def.Name) == "string" and def.Name ~= "", "ore needs a string `Name`")
+	assert(Config.Ores[def.Name] == nil, def.Name .. " already exists: edit Config.Ores[\"" .. def.Name .. "\"] instead")
+	Config.Ores[def.Name] = {
+		Enabled = def.Enabled ~= false, Custom = true, Biomes = def.Biomes, PerChunk = def.PerChunk or 1,
+		MinY = def.MinY or -60, MaxY = def.MaxY or 60, Size = def.Size or 4,
+		Rate = def.Rate or 1, BiomeRate = def.BiomeRate or {}, Extra = {},
+	}
+end
+
+-- Adds a structure; same fields as the entries of Config.Structures (see Config.luau):
+--   RegisterStructure({ Name = "Pyramid", Spacing = 30, Separation = 10, Biomes = { "desert" } })
+function TerrainGenerator.RegisterStructure(def: any)
+	assertNotStarted("RegisterStructure")
+	assert(type(def) == "table" and type(def.Name) == "string", "structure needs a string `Name`")
+	assert(Config.Structures[def.Name] == nil, def.Name .. " already exists: edit Config.Structures[\"" .. def.Name .. "\"] instead")
+	local rule = table.clone(def)
+	Structures.normalize(def.Name, rule) -- validate now, with a readable error
+	Config.Structures[def.Name] = rule
+end
+
+-- Adds a block for custom biome surfaces (`surface = { top = "crystal_stone" }`):
+--   RegisterBlock({ Name = "crystal_stone", Material = "Glacier", Color = Color3.fromRGB(120, 200, 255) })
+-- Roblox Terrain has ~22 materials, so Material must be the name of one of Enum.Material's terrain materials; the
+-- Color recolours that material for every block that uses it.
+function TerrainGenerator.RegisterBlock(def: any)
+	assertNotStarted("RegisterBlock")
+	assert(type(def) == "table" and type(def.Name) == "string" and type(def.Material) == "string", "block needs a Name and a Material (name of an Enum.Material)")
+	assert((Enum.Material :: any)[def.Material] ~= nil, "unknown Terrain material " .. def.Material)
+	table.insert(Config.Materials.Custom, { name = def.Name, material = def.Material, kind = def.Kind or "solid" })
+	if def.Color then
+		Config.Materials.Colors[def.Material] = def.Color
+	end
+end
+
+-- ---------------------------------------------------------------------------------------- placement hooks
+-- Instead of editing Placement.luau you can install handlers (server). onPlace(thingType, location, info) replaces
+-- the print; onRemove(chunkX, chunkZ) is called when a chunk unloads and its things should go.
+function TerrainGenerator.SetPlacementHandler(onPlace: (string, Vector3, any) -> ())
+	Placement.setHandlers(onPlace, nil)
+end
+
+function TerrainGenerator.SetRemovalHandler(onRemove: (number, number) -> ())
+	Placement.setHandlers(nil, onRemove)
+end
+
+-- ---------------------------------------------------------------------------------------- chunk locks and loading
+-- A locked chunk stays loaded for everyone (every client draws it, the server keeps its things) until it is unlocked,
+-- however far away all players are. Locks have owners (default "default"): a chunk stays locked while any owner holds
+-- it, so scripts cannot unlock each other's chunks. Server only; they work before Start() too.
+local function serverOnly(what: string)
+	assert(RunService:IsServer(), what .. " can only be used on the server")
+end
+
+function TerrainGenerator.LockChunk(cx: number, cz: number, owner: string?)
+	serverOnly("LockChunk")
+	locks:lockChunk(cx, cz, owner)
+end
+
+-- Inclusive chunk rectangle. Returns how many chunks were newly locked.
+function TerrainGenerator.LockArea(cx0: number, cz0: number, cx1: number, cz1: number, owner: string?): number
+	serverOnly("LockArea")
+	return locks:lockArea(cx0, cz0, cx1, cz1, owner)
+end
+
+function TerrainGenerator.UnlockChunk(cx: number, cz: number, owner: string?)
+	serverOnly("UnlockChunk")
+	locks:unlockChunk(cx, cz, owner)
+end
+
+function TerrainGenerator.UnlockArea(cx0: number, cz0: number, cx1: number, cz1: number, owner: string?): number
+	serverOnly("UnlockArea")
+	return locks:unlockArea(cx0, cz0, cx1, cz1, owner)
+end
+
+-- Releases everything one owner locked (default owner when nil).
+function TerrainGenerator.UnlockAll(owner: string?): number
+	serverOnly("UnlockAll")
+	return locks:unlockAll(owner)
+end
+
+-- Locked by `owner`, or by anybody when owner is nil. Works on clients too (reads the replicated lock list).
+function TerrainGenerator.IsChunkLocked(cx: number, cz: number, owner: string?): boolean
+	if clientCtl and not RunService:IsServer() then
+		return clientCtl.isLocked(cx, cz)
+	end
+	return locks:isLocked(cx, cz, owner)
+end
+
+function TerrainGenerator.GetLockedChunks(owner: string?): { { number } }
+	serverOnly("GetLockedChunks")
+	return locks:list(owner)
+end
+
+-- Loads the chunk (generates it and places its things) even if no player is anywhere near, and, by default, locks
+-- it so it stays. Yields until it is loaded on the server. Server only; call after Start().
+--   options.Lock          true (default): keep it loaded until UnlockChunk. false: keep it HoldSeconds (10) only
+--   options.Owner         lock owner (default "LoadChunk")
+--   options.Wait          false: do not yield
+--   options.Timeout       seconds to wait (default 60)
+-- A locked chunk is also loaded and drawn by every client, including players who join later.
+-- Returns true when the chunk is loaded.
+function TerrainGenerator.LoadChunk(cx: number, cz: number, options: any?): boolean
+	serverOnly("LoadChunk")
+	assert(serverCtl, "LoadChunk needs TerrainGenerator.Start() to have been called")
+	return serverCtl.loadChunk(cx, cz, options)
 end
 
 -- ---------------------------------------------------------------------------------------- streaming state
+-- Server: the chunk's things have been placed. Client: its terrain is drawn.
 function TerrainGenerator.IsChunkLoaded(cx: number, cz: number): boolean
-	return manager ~= nil and manager:isLoaded(cx, cz)
+	if serverCtl then
+		return serverCtl.isLoaded(cx, cz)
+	end
+	return clientCtl ~= nil and clientCtl.isLoaded(cx, cz)
 end
 
 function TerrainGenerator.GetStats(): { [string]: number }
-	if not manager then
-		return { loaded = 0, queued = 0, inflight = 0, sources = 0 }
+	if serverCtl then
+		return serverCtl.stats()
+	elseif clientCtl then
+		return clientCtl.stats()
 	end
-	return manager:stats()
+	return { loaded = 0, queued = 0, inflight = 0, sources = 0, locked = 0 }
 end
 
--- Yields until the initial Width x Length area around (0, 0) has been generated.
+-- Server: yields until the area around the spawn point has been generated.
 function TerrainGenerator.WaitForInitialArea()
-	while not initialLoaded do
+	while serverCtl == nil or not serverCtl.initialLoaded() do
 		task.wait(0.1)
 	end
 end
 
--- ---------------------------------------------------------------------------------------- spawn
-local function findSpawnPosition(): Vector3?
-	local top = baseY() + HEIGHT * VOXEL + 8
-	local params = RaycastParams.new()
-	local fallback: Vector3? = nil
-	local radius = Config.Spawn.ReadyRadiusChunks * CHUNK
-	local step = 16
-	local r = 0
-	while r <= radius do
-		-- points on the square ring at distance r
-		local points: { Vector3 } = {}
-		if r == 0 then
-			table.insert(points, Vector3.new(0, top, 0))
-		else
-			for t = -r, r, step do
-				table.insert(points, Vector3.new(t, top, -r))
-				table.insert(points, Vector3.new(t, top, r))
-				table.insert(points, Vector3.new(-r, top, t))
-				table.insert(points, Vector3.new(r, top, t))
-			end
-		end
-		for _, origin in points do
-			local hit = workspace:Raycast(origin, Vector3.new(0, -(HEIGHT * VOXEL + 16), 0), params)
-			if hit then
-				if hit.Material ~= Enum.Material.Water then
-					return hit.Position + Vector3.new(0, 6, 0)
-				elseif not fallback then
-					fallback = hit.Position + Vector3.new(0, 6, 0)
-				end
-			end
-		end
-		r += step
+-- The point where players spawn (studs, on the ground); nil before Start().
+function TerrainGenerator.GetSpawnPoint(): Vector3?
+	if serverCtl then
+		return serverCtl.spawnPoint
+	elseif clientCtl then
+		return clientCtl.spawnPoint
 	end
-	return fallback
-end
-
-local function releaseSpawn()
-	if spawnReady then
-		return
-	end
-	spawnReady = true
-	if Config.Spawn.AutoSpawn then
-		local pos = findSpawnPosition() or Vector3.new(0, baseY() + 508 + 20, 0)
-		local spawn = Instance.new("SpawnLocation")
-		spawn.Name = "TerrainSpawn"
-		spawn.Anchored = true
-		spawn.CanCollide = false
-		spawn.Transparency = 1
-		spawn.Size = Vector3.new(6, 1, 6)
-		spawn.Neutral = true
-		spawn.Duration = 0
-		spawn.Position = pos
-		spawn.Parent = workspace
-		Players.CharacterAutoLoads = true
-		for _, player in Players:GetPlayers() do
-			if player.Character == nil then
-				task.spawn(function()
-					player:LoadCharacter()
-				end)
-			end
-		end
-	end
-	spawnEvent:Fire()
+	return nil
 end
 
 -- ---------------------------------------------------------------------------------------- start / stop
-local function startInner()
-	local cfg = Config
-
-	local rx = math.max(1, math.ceil(cfg.Width / CHUNK / 2))
-	local rz = math.max(1, math.ceil(cfg.Length / CHUNK / 2))
-	local terrain = workspace.Terrain
-	if cfg.ClearBeforeGenerating then
-		terrain:Clear()
+-- Copies the module into ReplicatedStorage (clients need its code) and installs the client runner.
+local function deployClient()
+	if not script:IsDescendantOf(ReplicatedStorage) then
+		local existing = ReplicatedStorage:FindFirstChild("TerrainGenerator")
+		if existing then
+			existing:Destroy()
+		end
+		local copy = script:Clone()
+		copy.Name = "TerrainGenerator"
+		copy.Parent = ReplicatedStorage
 	end
-	ChunkWriter.applyGlobals(writerConfig())
-	writer = ChunkWriter.new(writerConfig())
-	if cfg.Spawn.AutoSpawn then
-		Players.CharacterAutoLoads = false
-	end
-
-	local initialTotal = (2 * rx) * (2 * rz)
-	local lastPercent = -1
-	local jobWorker: { [number]: number } = {}
-	local inflightBy: { number } = {}
-	local actors: { Actor } = {}
-	local localGenerator: any = nil
-	local localWriter: any = nil
-	local builder: any = nil
-	if cfg.Structures.Enabled and #structurePlacement > 0 then
-		builder = StructureBuilder.new(structureDefs, cfg.Structures.FolderName, baseY())
-	end
-
-	local function report(kind: string, ...)
-		if kind == "done" then
-			local jobId, cx, cz, ok, err, structures = ...
-			local w = jobWorker[jobId]
-			if w then
-				inflightBy[w] -= 1
-				jobWorker[jobId] = nil
+	local template = script:FindFirstChild("ClientRunner") :: LocalScript?
+	if template then
+		local function install(parent: Instance?)
+			if parent and not parent:FindFirstChild("TerrainGeneratorClient") then
+				local runner = template:Clone()
+				runner.Name = "TerrainGeneratorClient"
+				runner.Disabled = false
+				runner.Parent = parent
 			end
-			-- build before onDone: if the chunk was cancelled meanwhile, onDone unloads it and removes the build
-			if ok and builder and structures then
-				builder:build(cx, cz, structures)
-			end
-			manager:onDone(jobId, cx, cz, ok, err)
 		end
-	end
-
-	manager = ChunkManager.new({
-		radius = rx,
-		radiusZ = rz,
-		margin = cfg.Streaming.UnloadMargin,
-		-- at most one job per actor: an actor's generator is not re-entrant
-		maxInFlight = cfg.Workers.Enabled and math.min(cfg.Streaming.MaxChunksInFlight, math.max(1, cfg.Workers.Count)) or 1,
-		playerGrace = cfg.Streaming.PlayerGraceSeconds,
-	}, {
-		dispatch = function(cx: number, cz: number, jobId: number)
-			if cfg.Workers.Enabled then
-				local best, bestLoad = 1, math.huge
-				for i = 1, #actors do
-					if inflightBy[i] < bestLoad then
-						best, bestLoad = i, inflightBy[i]
-					end
-				end
-				inflightBy[best] += 1
-				jobWorker[jobId] = best
-				actors[best]:SendMessage("Generate", jobId, cx, cz)
-			else
-				task.spawn(function()
-					task.wait()
-					local sliceStart = os.clock()
-					local sliceSeconds = cfg.Workers.SliceMs / 1000
-					local ok, err = pcall(function()
-						local chunk = localGenerator:generate(cx, cz, function()
-							if os.clock() - sliceStart >= sliceSeconds then
-								task.wait()
-								sliceStart = os.clock()
-							end
-						end)
-						localWriter:write(chunk)
-						if builder and chunk.structures then
-							builder:build(cx, cz, chunk.structures)
-						end
-					end)
-					manager:onDone(jobId, cx, cz, ok, err and tostring(err) or nil)
-				end)
-			end
-		end,
-		unload = function(cx: number, cz: number)
-			writer:unload(cx, cz)
-			if builder then
-				builder:unload(cx, cz)
-			end
-			chunkUnloadedEvent:Fire(cx, cz)
-		end,
-		onLoaded = function(cx: number, cz: number)
-			chunkLoadedEvent:Fire(cx, cz)
-		end,
-		onFailed = function(cx: number, cz: number, err: string)
-			warn(string.format("[TerrainGenerator] chunk (%d, %d) failed: %s", cx, cz, err))
-		end,
-	})
-
-	-- ------------------------------------------------------------------ workers
-	if cfg.Workers.Enabled then
-		local folder = Instance.new("Folder")
-		folder.Name = "TerrainGeneratorWorkers"
-		folder.Parent = ServerScriptService
-		container = folder
-		local events = Instance.new("BindableEvent")
-		events.Name = "Events"
-		events.Parent = folder
-
-		local template = script.Streaming.WorkerTemplate :: Actor
-		local count = math.max(1, cfg.Workers.Count)
-		local bound, ready = 0, 0
-		local failed: string? = nil
-		events.Event:Connect(function(kind: string, ...)
-			if kind == "bound" then
-				bound += 1
-			elseif kind == "ready" then
-				local _, ok, err = ...
-				if ok then
-					ready += 1
-				else
-					failed = tostring(err)
-				end
-			else
-				report(kind, ...)
-			end
-		end)
-		for i = 1, count do
-			local actor = template:Clone()
-			actor.Name = "Worker" .. i
-			local modules = Instance.new("ObjectValue")
-			modules.Name = "Modules"
-			modules.Value = script
-			modules.Parent = actor
-			local ev = Instance.new("ObjectValue")
-			ev.Name = "Events"
-			ev.Value = events
-			ev.Parent = actor
-			actor.Parent = folder
-			;(actor:FindFirstChild("Worker") :: Script).Disabled = false
-			actors[i] = actor
-			inflightBy[i] = 0
-		end
-		local t0 = os.clock()
-		while bound < count and os.clock() - t0 < 15 do
-			task.wait(0.05)
-		end
-		assert(bound == count, "TerrainGenerator: workers failed to start (is the module inside ServerScriptService?)")
-		local init = { seed = cfg.Seed, generator = generatorOptions(), writer = writerConfig(), sliceMs = cfg.Workers.SliceMs }
-		for _, actor in actors do
-			actor:SendMessage("Init", init)
-		end
-		t0 = os.clock()
-		while ready < count and not failed and os.clock() - t0 < 120 do
-			task.wait(0.05)
-		end
-		assert(not failed, "TerrainGenerator worker failed to initialise: " .. tostring(failed))
-		assert(ready == count, "TerrainGenerator: timed out waiting for workers")
-		if cfg.PrintProgress then
-			print(string.format("[TerrainGenerator] %d workers ready, generating %dx%d chunks around the origin", count, 2 * rx, 2 * rz))
-		end
-	else
-		localGenerator = ChunkGenerator.new(cfg.Seed, generatorOptions())
-		localWriter = ChunkWriter.new(writerConfig())
-		ChunkWriter.setBiomeNames(localWriter, localGenerator.registry.names)
-	end
-
-	-- ------------------------------------------------------------------ streaming loop
-	manager:setAnchor("initial", 0, 0, rx, rz)
-	Players.PlayerRemoving:Connect(function(player)
-		manager:removePlayer(tostring(player.UserId))
-	end)
-
-	local accumulator = 0
-	local jobCap: number = manager.maxInFlight
-	local governor = LoadGovernor.new(jobCap, cfg.Streaming.TargetFrameMs / 1000)
-	heartbeat = RunService.Heartbeat:Connect(function(dt: number)
-		governor:sample(dt)
-		accumulator += dt
-		if accumulator < cfg.Streaming.UpdateInterval then
-			return
-		end
-		accumulator = 0
-		-- before players can spawn nobody is playing, so generate at full speed; afterwards protect the frame rate
-		manager.maxInFlight = if cfg.Streaming.AdaptiveLoad and spawnReady then governor:step() else jobCap
+		install(StarterPlayer:FindFirstChild("StarterPlayerScripts"))
 		for _, player in Players:GetPlayers() do
-			local id = tostring(player.UserId)
-			local character = player.Character
-			local root = character and character:FindFirstChild("HumanoidRootPart") :: BasePart?
-			if root then
-				manager:setPlayer(id, math.floor(root.Position.X / CHUNK), math.floor(root.Position.Z / CHUNK))
-			else
-				manager:touchPlayer(id)
-			end
+			install(player:FindFirstChild("PlayerGui"))
 		end
-		manager:update()
-
-		if not spawnReady then
-			local r = cfg.Spawn.ReadyRadiusChunks
-			local n, total = manager:loadedInBox(0, 0, r)
-			if n == total then
-				releaseSpawn()
-			end
-		end
-		if not initialLoaded then
-			local loaded = 0
-			for x = -rx, rx - 1 do
-				for z = -rz, rz - 1 do
-					if manager:isLoaded(x, z) then
-						loaded += 1
-					end
-				end
-			end
-			local percent = math.floor(loaded / initialTotal * 100)
-			if cfg.PrintProgress and percent >= lastPercent + 10 then
-				lastPercent = percent - percent % 10
-				print(string.format("[TerrainGenerator] initial area %d%% (%d/%d chunks)", percent, loaded, initialTotal))
-			end
-			if loaded == initialTotal then
-				initialLoaded = true
-				if not cfg.Streaming.KeepInitialArea then
-					manager:removeAnchor("initial")
-				end
-				initialEvent:Fire()
-			end
-		end
-	end)
+	end
 end
 
--- Generates the initial area around (0, 0), then keeps a Width x Length window loaded around every player.
--- Yields until the workers are ready (a few seconds); terrain then streams in the background.
-function TerrainGenerator.Start()
-	assert(RunService:IsServer(), "TerrainGenerator.Start() must run on the server")
-	if started then
+-- Server: publishes the world to the clients and starts generating. Yields until the workers are ready.
+function TerrainGenerator.StartServer()
+	assert(RunService:IsServer(), "TerrainGenerator.StartServer() must run on the server")
+	if serverCtl then
 		return
 	end
-	started = true
-	local ok, err = pcall(startInner)
+	local ok, result = pcall(Server.start, {
+		Config = Config,
+		module = script,
+		customBiomes = customBiomes,
+		locks = locks,
+		getQueryGenerator = getQueryGenerator,
+		deployClient = deployClient,
+		signals = signals,
+	})
 	if not ok then
 		-- never leave players stuck without characters if start-up failed
-		started = false
 		Players.CharacterAutoLoads = true
-		if heartbeat then
-			heartbeat:Disconnect()
-			heartbeat = nil
+		local state = ReplicatedStorage:FindFirstChild("TerrainGeneratorState")
+		if state then
+			state:Destroy()
 		end
-		if container then
-			container:Destroy()
-			container = nil
+		local workers = game:GetService("ServerScriptService"):FindFirstChild("TerrainGeneratorWorkers")
+		if workers then
+			workers:Destroy()
 		end
-		error(err, 0)
+		error(result, 0)
+	end
+	serverCtl = result
+end
+
+-- Client: waits for the server's world, then draws the terrain around this player. Called by the client runner.
+function TerrainGenerator.StartClient()
+	if clientCtl then
+		return
+	end
+	clientCtl = Client.start({
+		Config = Config,
+		module = script,
+		signals = signals,
+		setCustomBiomes = function(list: { any })
+			customBiomes = list
+			queryGen = nil
+		end,
+	})
+end
+
+-- Start the generator: on the server this runs StartServer, on a client StartClient.
+function TerrainGenerator.Start()
+	if RunService:IsServer() then
+		TerrainGenerator.StartServer()
+	else
+		TerrainGenerator.StartClient()
 	end
 end
 
 function TerrainGenerator.Stop()
-	if not started then
-		return
+	if serverCtl then
+		serverCtl.stop()
+		serverCtl = nil
 	end
-	started = false
-	if heartbeat then
-		heartbeat:Disconnect()
-		heartbeat = nil
+	if clientCtl then
+		clientCtl.stop()
+		clientCtl = nil
 	end
-	if container then
-		container:Destroy()
-		container = nil
-	end
-	manager = nil
-	initialLoaded = false
-	spawnReady = false
 end
 
 return TerrainGenerator

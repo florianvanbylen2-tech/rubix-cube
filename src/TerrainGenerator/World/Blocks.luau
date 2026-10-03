@@ -110,6 +110,39 @@ end
 Blocks.solidBuf = solidBuf
 Blocks.fluidBuf = fluidBuf
 
+-- Applies user customisation (call once per Lua VM, before any generator / writer is created):
+--   spec.materials = { grass_block = "LeafyGrass", stone = "Slate" }     remap a block to another Terrain material
+--   spec.custom    = { { name = "crystal_stone", material = "Glacier", kind = "solid" } }   add new blocks
+--   spec.colors    = { Grass = { 96, 156, 58 } }                         recolour a Terrain material
+-- Roblox Terrain only has ~22 materials: several blocks share one material and therefore one colour.
+function Blocks.configure(spec: any)
+	if type(spec) ~= "table" then
+		return
+	end
+	for _, def in spec.custom or {} do
+		local id = Blocks.ids[def.name]
+		if id == nil then
+			id = Blocks.count
+			assert(id < 255, "too many blocks (max 255)")
+			Blocks.count += 1
+			Blocks.ids[def.name] = id
+			Blocks.names[id] = def.name
+		end
+		Blocks.materials[id] = def.material or "Rock"
+		local kind = def.kind or "solid"
+		buffer.writeu8(solidBuf, id, kind == "solid" and 1 or 0)
+		buffer.writeu8(fluidBuf, id, kind == "fluid" and 1 or 0)
+	end
+	for name, material in spec.materials or {} do
+		local id = Blocks.ids[name]
+		assert(id ~= nil, "Config.Materials.Blocks: unknown block " .. tostring(name))
+		Blocks.materials[id] = material
+	end
+	for material, rgb in spec.colors or {} do
+		Blocks.colors[material] = { rgb[1], rgb[2], rgb[3] }
+	end
+end
+
 function Blocks.id(name: string): number
 	local id = Blocks.ids[name]
 	if id == nil then

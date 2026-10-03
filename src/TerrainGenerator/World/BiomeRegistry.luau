@@ -13,7 +13,7 @@
 --     priority = 1,                     -- higher wins when several custom biomes match
 --     surface = { top = "grass_block", filler = "dirt", fillerDepth = 3 },
 --     trees = { { species = "crystal_tree", perChunk = 3 } },
---     ores = { { name = "mana", tier = 4, perChunk = 2, minY = -32, maxY = 64, size = 6 } },
+--     ores = { { name = "mana", perChunk = 2, minY = -32, maxY = 64, size = 6 } },
 --     temperature = 0.8,                -- optional overrides of the base biome's climate values
 --   }
 
@@ -28,7 +28,7 @@ export type Custom = {
 	priority: number?,
 	surface: { top: string?, filler: string?, fillerDepth: number? }?,
 	trees: { { species: string, perChunk: number?, chance: number? } }?,
-	ores: { { name: string, tier: number, perChunk: number?, minY: number?, maxY: number?, size: number? } }?,
+	ores: { { name: string, perChunk: number?, minY: number?, maxY: number?, size: number? } }?,
 	temperature: number?,
 	downfall: number?,
 }

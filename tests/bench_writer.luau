@@ -1,7 +1,7 @@
 --@include roblox_mock.luau
 local ChunkGenerator = require(TG.World.ChunkGenerator)
 local ChunkWriter = require(TG.Streaming.ChunkWriter)
-local cfg = { bedrockLevel = 0, folderName = "GeneratedCollectables", collectables = true, partSize = Vector3.new(4, 4, 4), colorParts = false, applyColors = false, writeBudgetMs = math.huge }
+local cfg = { bedrockLevel = 0, applyColors = false, writeBudgetMs = math.huge }
 local gen = ChunkGenerator.new(12345)
 local writer = ChunkWriter.new(cfg)
 ChunkWriter.setBiomeNames(writer, gen.registry.names)

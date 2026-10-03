@@ -34,6 +34,37 @@ local function getVanillaTree(): Climate.Tree
 	return vanillaTree :: Climate.Tree
 end
 
+-- Parameter tree without the disabled biomes: their climate points are removed, so the nearest remaining biome in
+-- climate space takes over their territory (what deleting them from a datapack's multi_noise preset would do).
+local filteredTrees: { [string]: Climate.Tree } = {}
+local function getTree(disabled: { string }?): Climate.Tree
+	if disabled == nil or #disabled == 0 then
+		return getVanillaTree()
+	end
+	local sorted = table.clone(disabled)
+	table.sort(sorted)
+	local key = table.concat(sorted, ",")
+	local cached = filteredTrees[key]
+	if cached then
+		return cached
+	end
+	local off: { [string]: boolean } = {}
+	for _, name in sorted do
+		off[(string.gsub(name, "^minecraft:", ""))] = true
+	end
+	local points: { Climate.Point } = {}
+	local all = OverworldBiomeBuilder.build()
+	for _, p in all do
+		if not off[p.value] then
+			table.insert(points, p)
+		end
+	end
+	assert(#points > 0, "Config.Biomes.Disabled removes every biome")
+	local tree = Climate.buildTree(points)
+	filteredTrees[key] = tree
+	return tree
+end
+
 -- LinearCongruentialGenerator.next(seed, increment) = seed * (seed * 6364136223846793005 + 1442695040888963407) + increment
 local function lcgNext(sh: number, sl: number, ih: number, il: number): (number, number)
 	local th, tl = Int64.mul(sh, sl, 0x5851F42D, 0x4C957F2D)
@@ -48,13 +79,13 @@ local function fiddle(h: number, l: number): number
 end
 
 -- `sampler` is a compiled density Sampler; `registry` a BiomeRegistry
-function BiomeSource.new(sampler: Compiler.Sampler, registry: any, rs: any): BiomeSource
+function BiomeSource.new(sampler: Compiler.Sampler, registry: any, rs: any, disabled: { string }?): BiomeSource
 	local router = sampler.router
 	local fns = sampler.fns
 	local self = setmetatable({}, BiomeSource) :: any
 
 	self.registry = registry
-	self.tree = getVanillaTree()
+	self.tree = getTree(disabled)
 	self.tempFn = fns[router.temperature]
 	self.humFn = fns[router.vegetation]
 	self.contFn = fns[router.continents]

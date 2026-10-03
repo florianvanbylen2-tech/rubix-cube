@@ -24,12 +24,18 @@ echo "noise fill shortcuts == brute force (slow)"
 run tests/shortcuts.luau --codegen | tail -1
 echo "time-sliced generation == uninterrupted generation"
 run tests/sliced.luau --codegen | tail -1
-echo "structures: random_spread placement, determinism, filters"
+echo "structures: random_spread chunk selection vs independent Python implementation"
+run tests/structures_spread.luau | diff -q - <(python3 tests/structures_ref.py) >/dev/null && pass "729 lines identical"
+echo "structures: placement rules, determinism, filters"
 run tests/structures.luau | tail -1
 echo "chunk writer against a mocked Terrain"
 run tests/writer.luau --codegen | tail -1
-echo "Start() end-to-end against mocked Roblox services"
-run tests/start_local.luau --codegen | tail -1
+echo "spawn rules (Enabled / Biomes / Rate / Extra / custom things)"
+run tests/placements.luau --codegen | tail -1
+echo "biome removal and custom blocks"
+run tests/biomes_custom.luau --codegen | tail -1
+echo "client/server split end to end against mocked Roblox services (locks, LoadChunk, late join, spawn, pig)"
+run tests/system.luau --codegen | tail -1
 echo "load governor"
 run tests/governor.luau | tail -1
 echo "all done"

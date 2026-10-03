@@ -10,7 +10,7 @@ local BiomeSource = require(script.Parent.BiomeSource)
 local SurfaceSystem = require(script.Parent.SurfaceSystem)
 local Carvers = require(script.Parent.Carvers)
 local Features = require(script.Parent.Features)
-local Structures = require(script.Parent.Structures)
+local Placements = require(script.Parent.Placements)
 
 local HEIGHT = Settings.height
 
@@ -26,31 +26,45 @@ export type Chunk = {
 	aquifer: any?,
 	carvedList: { number }?,
 	collectables: { any },
-	structures: { any }?, -- placements whose origin is this chunk (see World/Structures)
+	placements: { any }?, -- things to place (trees, ores, structures) after the spawn rules, see World/Placements
 }
 
 local ChunkGenerator = {}
 ChunkGenerator.__index = ChunkGenerator
 
 -- seed: number or string; options.customBiomes: { BiomeRegistry.Custom }
-function ChunkGenerator.new(seed: number | string, options: { customBiomes: { any }?, treeDensity: number?, oreDensity: number?, oreTiers: { [string]: number }?, smooth: boolean?, structures: { any }? }?)
+export type Options = {
+	customBiomes: { any }?, -- RegisterBiome definitions
+	disabledBiomes: { string }?, -- vanilla biomes removed from the world
+	smooth: boolean?, -- sub-voxel occupancy (only needed where terrain is written)
+	things: boolean?, -- compute trees / ores / structures (false on clients: they only need terrain)
+	spawning: any?, -- Config.Spawning
+	trees: any?, -- Config.Trees
+	ores: any?, -- Config.Ores
+	structures: { any }?, -- normalized structure rules (World/Structures.normalizeAll)
+}
+
+function ChunkGenerator.new(seed: number | string, options: Options?)
 	local sh, sl = RandomState.seedFrom(seed)
 	local rs = RandomState.new(sh, sl)
 	local sampler = Compiler.compile(rs)
 	local registry = BiomeRegistry.new(options and options.customBiomes)
+	for _, name in (options and options.disabledBiomes) or {} do
+		assert(registry.ids[(string.gsub(name, "^minecraft:", ""))] ~= nil, "Config.Biomes.Disabled: unknown biome " .. name)
+	end
 	local self = {
 		rs = rs,
 		sampler = sampler,
 		registry = registry,
-		biomes = BiomeSource.new(sampler, registry, rs),
+		biomes = BiomeSource.new(sampler, registry, rs, options and options.disabledBiomes),
 		fill = NoiseFill.new(sampler, rs),
 		smooth = not options or options.smooth ~= false,
 	}
 	setmetatable(self, ChunkGenerator)
 	self.surface = SurfaceSystem.new(self)
 	self.features = Features.new(self, options)
-	if options and options.structures and #options.structures > 0 then
-		self.structures = Structures.new(self, options.structures)
+	if not options or options.things ~= false then
+		self.placements = Placements.new(self, options)
 	end
 	return self
 end
@@ -121,8 +135,8 @@ function ChunkGenerator.generate(self: any, cx: number, cz: number, yieldFn: (()
 		yieldFn()
 	end
 	Features.generate(self.features, chunk)
-	if self.structures then
-		chunk.structures = Structures.place(self.structures, chunk)
+	if self.placements then
+		Placements.build(self.placements, chunk)
 	end
 	chunk.aquifer = nil
 	return chunk

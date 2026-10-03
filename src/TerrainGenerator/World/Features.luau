@@ -2,8 +2,9 @@
 --!native
 -- Feature stage: interprets the vanilla placed-feature JSON (placement modifiers + feature programs) for
 -- the features that matter to a Roblox world:
---   * ores      -> terrain blobs (granite, dirt, gravel, ...) or `Ore_N` collectible records
---   * trees     -> `Tree` collectible records (species chosen exactly like vanilla's selectors)
+--   * ores      -> terrain blobs (granite, dirt, gravel, ...) or ore records (coal, iron, ...)
+--   * trees     -> tree records (species chosen exactly like vanilla's selectors)
+-- The records go to World/Placements, which applies the spawn rules and hands them to Placement.placeThing.
 --   * disks     -> sand / clay / gravel patches on shallow sea floors
 --   * freeze    -> snow on cold ground, ice on cold water
 -- Features draw from a per-feature, per-chunk random (deterministic, independent of generation order).
@@ -43,9 +44,7 @@ local SOIL = idSet({ "dirt", "grass_block", "podzol", "coarse_dirt", "mycelium",
 local PROPAGULE_SOIL = idSet({ "dirt", "grass_block", "podzol", "coarse_dirt", "mycelium", "mud", "moss_block", "clay" })
 
 export type Options = {
-	treeDensity: number?,
-	oreDensity: number?,
-	oreTiers: { [string]: number }?,
+	things: boolean?, -- false: skip tree / ore records entirely (clients only need the terrain)
 }
 
 local Features = {}
@@ -55,9 +54,7 @@ function Features.new(gen: any, options: Options?)
 	local o: Options = options or {}
 	local self = setmetatable({
 		gen = gen,
-		treeDensity = o.treeDensity or 1.0,
-		oreDensity = o.oreDensity or 1.0,
-		oreTiers = o.oreTiers or { coal = 1, copper = 2, iron = 2, redstone = 3, lapis = 3, gold = 4, diamond = 5, emerald = 5 },
+		things = o.things ~= false,
 		factories = {} :: { [string]: any },
 		setCache = {} :: { [number]: { { [string]: boolean } } },
 		universal = {} :: { [string]: boolean },
@@ -229,20 +226,8 @@ end
 -- ------------------------------------------------------------------ placement modifiers
 type Pos = { number }
 
-local function scaleCount(self: any, n: number, scale: number, random: any): number
-	if scale == 1.0 or n <= 0 then
-		return n
-	end
-	local target = n * scale
-	local whole = floor(target)
-	if random:nextFloat() < target - whole then
-		whole += 1
-	end
-	return whole
-end
-
 -- Runs the modifier list (without `biome`) over one start position. Returns the resulting positions.
-local function applyModifiers(env: Env, mods: { any }, start: Pos, scale: number): { Pos }
+local function applyModifiers(env: Env, mods: { any }, start: Pos): { Pos }
 	local positions: { Pos } = { start }
 	local random = env.random
 	for _, m in mods do
@@ -251,7 +236,7 @@ local function applyModifiers(env: Env, mods: { any }, start: Pos, scale: number
 			local out: { Pos } = {}
 			for _, p in positions do
 				if t == "count" then
-					local n = scaleCount(env.self, Providers.int(m.count, random), scale, random)
+					local n = Providers.int(m.count, random)
 					for _ = 1, n do
 						table.insert(out, { p[1], p[2], p[3] })
 					end
@@ -282,7 +267,6 @@ local function applyModifiers(env: Env, mods: { any }, start: Pos, scale: number
 				elseif t == "noise_based_count" then
 					local d0 = BIOME_INFO_NOISE:getValue(p[1] / m.noise_factor, p[3] / m.noise_factor, false)
 					local n = ceil((d0 + m.noise_offset) * m.noise_to_count_ratio)
-					n = scaleCount(env.self, n, scale, random)
 					for _ = 1, n do
 						table.insert(out, { p[1], p[2], p[3] })
 					end
@@ -307,6 +291,9 @@ end
 
 -- OreFeature.place. `writeInto`: only positions inside env.chunk are written / counted.
 local function placeOre(env: Env, p: Pos, prog: any, collect: boolean)
+	if collect and not env.self.things then
+		return
+	end
 	local random = env.random
 	local size = prog.size
 	local discard = prog.discard
@@ -461,12 +448,10 @@ local function placeOre(env: Env, p: Pos, prog: any, collect: boolean)
 	end
 	if collect and placed > 0 then
 		local ore = oreType(prog.targets[1].state)
-		local tier = ore and env.self.oreTiers[ore]
-		if ore and tier then
+		if ore then
 			table.insert(chunk.collectables, {
 				kind = "Ore",
 				ore = ore,
-				tier = tier,
 				x = (x0 + x1) / 2,
 				y = (y0 + y1) / 2,
 				z = (z0 + z1) / 2,
@@ -521,6 +506,9 @@ end
 
 -- ------------------------------------------------------------------ trees
 local function addTree(env: Env, p: Pos, prog: any)
+	if not env.self.things then
+		return
+	end
 	local below = getBlock(env, p[1], p[2] - 1, p[3])
 	if below == nil then
 		return
@@ -593,7 +581,7 @@ runPlaced = function(env: Env, placed: any, p: Pos)
 			return
 		end
 	end
-	local positions = applyModifiers(env, placed.placement, p, 1.0)
+	local positions = applyModifiers(env, placed.placement, p)
 	for _, q in positions do
 		runProgram(env, placed.feature, q)
 	end
@@ -644,7 +632,7 @@ local function customFeatures(self: any, env: Env)
 		local random = factory:at(chunk.cx, 0, chunk.cz)
 		env.random = random
 		for _, t in def.trees or {} do
-			local n = scaleCount(self, floor(t.perChunk or 2) + ((random:nextFloat() < (t.perChunk or 2) % 1) and 1 or 0), self.treeDensity, random)
+			local n = floor(t.perChunk or 2) + ((random:nextFloat() < (t.perChunk or 2) % 1) and 1 or 0)
 			for _ = 1, n do
 				local x, z = env.minX + random:nextInt(16), env.minZ + random:nextInt(16)
 				local col = (x - env.minX) * 16 + (z - env.minZ)
@@ -659,7 +647,7 @@ local function customFeatures(self: any, env: Env)
 			end
 		end
 		for _, o in def.ores or {} do
-			local n = scaleCount(self, floor(o.perChunk or 1) + ((random:nextFloat() < (o.perChunk or 1) % 1) and 1 or 0), self.oreDensity, random)
+			local n = floor(o.perChunk or 1) + ((random:nextFloat() < (o.perChunk or 1) % 1) and 1 or 0)
 			for _ = 1, n do
 				local x, z = env.minX + random:nextInt(16), env.minZ + random:nextInt(16)
 				local col = (x - env.minX) * 16 + (z - env.minZ)
@@ -668,7 +656,7 @@ local function customFeatures(self: any, env: Env)
 					if hi >= lo then
 						local y = random:nextInt(hi - lo + 1) + lo
 						table.insert(chunk.collectables, {
-							kind = "Ore", ore = o.name, tier = o.tier, x = x, y = y, z = z, count = o.size or 4,
+							kind = "Ore", ore = o.name, x = x, y = y, z = z, count = o.size or 4,
 						})
 					end
 				end
@@ -694,12 +682,9 @@ local function clusterVeinOres(self: any, chunk: any)
 		g.z += z
 	end
 	for _, g in groups do
-		local tier = self.oreTiers[g.ore]
-		if tier and (self.oreDensity >= 1 or true) then
-			table.insert(chunk.collectables, {
-				kind = "Ore", ore = g.ore, tier = tier, x = g.x / g.n, y = g.y / g.n, z = g.z / g.n, count = g.n,
-			})
-		end
+		table.insert(chunk.collectables, {
+			kind = "Ore", ore = g.ore, x = g.x / g.n, y = g.y / g.n, z = g.z / g.n, count = g.n,
+		})
 	end
 end
 
@@ -750,12 +735,6 @@ function Features.generate(self: any, chunk: any)
 			env.name, env.step = name, step
 			local factory = factoryFor(self, name)
 			local isTerrainOre = prog.kind == "ore" and Blocks.ids[prog.targets[1].state] ~= nil
-			local scale = 1.0
-			if prog.kind == "tree" or prog.kind == "pick" or prog.kind == "any" or prog.kind == "bool" then
-				scale = self.treeDensity
-			elseif prog.kind == "ore" and not isTerrainOre then
-				scale = self.oreDensity
-			end
 
 			if prog.kind == "freeze" then
 				freezeTopLayer(self, env)
@@ -767,7 +746,7 @@ function Features.generate(self: any, chunk: any)
 						local ncx, ncz = cx + dx, cz + dz
 						env.random = factory:at(ncx, step, ncz)
 						local origin: Pos = { ncx * 16, MIN_Y, ncz * 16 }
-						local positions = applyModifiers(env, placed.placement, origin, scale)
+						local positions = applyModifiers(env, placed.placement, origin)
 						local universal = self.universal[name .. "@" .. step]
 						for _, p in positions do
 							-- the biome modifier is last in every list: check membership at the placement position
@@ -785,8 +764,10 @@ function Features.generate(self: any, chunk: any)
 			end
 		end
 	end
-	clusterVeinOres(self, chunk)
-	customFeatures(self, env)
+	if self.things then
+		clusterVeinOres(self, chunk)
+		customFeatures(self, env)
+	end
 end
 
 return Features

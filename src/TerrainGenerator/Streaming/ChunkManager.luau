@@ -6,6 +6,9 @@
 -- unloaded once it has left the windows of ALL sources (plus a hysteresis margin), so players sharing an area
 -- never unload terrain out from under each other, and a player leaving only frees what nobody else needs.
 --
+-- Locked chunks (setLocked) behave like an extra source that never moves: they are wanted and kept whatever the
+-- distance to every player, and are never unloaded until the lock set no longer contains them.
+--
 -- Chunk lifecycle:  (none) -> queued -> inflight -> loaded -> (none)
 --   * queued chunks that stop being needed are simply dropped;
 --   * inflight chunks that stop being needed are flagged `cancelled` and unloaded as soon as they complete
@@ -45,6 +48,8 @@ type Source = { cx: number, cz: number, radius: number, radiusZ: number, lastSee
 local ChunkManager = {}
 ChunkManager.__index = ChunkManager
 
+local LOCK_PRIORITY = 1e9 -- locked chunks outside every window load after all windowed ones
+
 local function key(cx: number, cz: number): number
 	return (cx + 2097152) * 4194304 + (cz + 2097152)
 end
@@ -67,6 +72,7 @@ function ChunkManager.new(options: Options, callbacks: Callbacks)
 		loaded = 0,
 		dirty = true,
 		failures = {} :: { [number]: number },
+		locked = {} :: { [number]: boolean },
 	}, ChunkManager)
 	return self
 end
@@ -74,6 +80,16 @@ end
 local function now(self: any): number
 	local f = self.cb.now
 	return f and f() or os.clock()
+end
+
+-- Replaces the set of locked chunks (keys from LockRegistry.key). The table is read, never modified.
+function ChunkManager.setLocked(self: any, set: { [number]: boolean })
+	self.locked = set
+	self.dirty = true
+end
+
+function ChunkManager.isLocked(self: any, cx: number, cz: number): boolean
+	return self.locked[key(cx, cz)] == true
 end
 
 -- Sets/moves a player's window centre (chunk coordinates). `id` is any unique string (e.g. UserId).
@@ -145,12 +161,16 @@ function ChunkManager.retryFailed(self: any)
 	self.dirty = true
 end
 
-function ChunkManager.stats(self: any): { loaded: number, queued: number, inflight: number, sources: number }
+function ChunkManager.stats(self: any): { loaded: number, queued: number, inflight: number, sources: number, locked: number }
 	local n = 0
 	for _ in self.sources do
 		n += 1
 	end
-	return { loaded = self.loaded, queued = #self.queue, inflight = self.inflight, sources = n }
+	local l = 0
+	for _ in self.locked do
+		l += 1
+	end
+	return { loaded = self.loaded, queued = #self.queue, inflight = self.inflight, sources = n, locked = l }
 end
 
 local function unloadChunk(self: any, c: Chunk)
@@ -194,6 +214,14 @@ function ChunkManager.update(self: any)
 						end
 					end
 				end
+			end
+		end
+
+		-- locked chunks: always kept; wanted too, after everything the windows want
+		for k in self.locked do
+			keep[k] = true
+			if wanted[k] == nil then
+				wanted[k] = LOCK_PRIORITY
 			end
 		end
 

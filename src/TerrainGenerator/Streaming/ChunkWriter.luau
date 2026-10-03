@@ -1,7 +1,8 @@
 --!strict
 --!native
--- Turns generated chunk data into Roblox Terrain voxels and collectable Parts, and removes them again.
--- Runs in the serial phase (Terrain writes and Instance creation are not parallel-safe).
+-- Turns generated chunk data into Roblox Terrain voxels, and removes them again.
+-- Runs in the serial phase (Terrain writes are not parallel-safe). Where it runs (server or each client) is decided
+-- by Config.TerrainMode.
 --
 -- Terrain: the chunk is written per 16-block section. Sections that are entirely one block (deep stone, open
 -- sky, open water) become a single FillBlock / are skipped; mixed sections are written with WriteVoxels, merged
@@ -11,7 +12,6 @@ local Blocks = require(script.Parent.Parent.World.Blocks)
 local Settings = require(script.Parent.Parent.Data.Settings)
 
 local HEIGHT = Settings.height
-local MIN_Y = Settings.minY
 local SECTION = 16
 local SECTIONS = HEIGHT // SECTION
 local MAX_RUN = 4 -- sections per WriteVoxels call (bounds the time of one engine call and of building its tables)
@@ -21,11 +21,8 @@ local AIR = Blocks.AIR
 
 export type WriterConfig = {
 	bedrockLevel: number,
-	folderName: string,
-	collectables: boolean,
-	partSize: Vector3,
-	colorParts: boolean,
 	applyColors: boolean,
+	variants: { [string]: string }?, -- Terrain base material -> MaterialVariant name
 	decoration: boolean?,
 	writeBudgetMs: number?, -- yield (task.wait) between engine calls once a write has used this much time
 }
@@ -38,40 +35,21 @@ local LEAFY_BIOMES = {
 	windswept_forest = true, cherry_grove = true, grove = true,
 }
 
-local TREE_COLORS: { [string]: { number } } = {
-	default = { 70, 140, 60 }, spruce = { 40, 90, 60 }, pine = { 40, 90, 60 }, mega_spruce = { 40, 90, 60 },
-	mega_pine = { 40, 90, 60 }, birch = { 130, 170, 90 }, super_birch = { 130, 170, 90 }, jungle_tree = { 50, 150, 40 },
-	mega_jungle_tree = { 50, 150, 40 }, jungle_bush = { 50, 150, 40 }, acacia = { 150, 160, 60 }, dark_oak = { 40, 90, 40 },
-	mangrove = { 90, 110, 60 }, tall_mangrove = { 90, 110, 60 }, cherry = { 240, 170, 200 },
-	huge_red_mushroom = { 200, 50, 50 }, huge_brown_mushroom = { 150, 110, 80 },
-}
-local ORE_COLORS: { [string]: { number } } = {
-	coal = { 40, 40, 40 }, iron = { 216, 175, 147 }, copper = { 224, 130, 80 }, gold = { 250, 210, 60 },
-	redstone = { 230, 40, 40 }, lapis = { 40, 80, 200 }, diamond = { 80, 230, 230 }, emerald = { 60, 200, 100 },
-}
-
 local ChunkWriter = {}
 ChunkWriter.__index = ChunkWriter
 
 function ChunkWriter.new(config: WriterConfig)
 	local terrain = workspace.Terrain
-	local root = workspace:FindFirstChild(config.folderName)
-	if config.collectables and not root then
-		local f = Instance.new("Folder")
-		f.Name = config.folderName
-		f.Parent = workspace
-		root = f
-	end
-
 	local materialOf: { [number]: Enum.Material } = {}
 	for id = 0, Blocks.count - 1 do
 		local name = Blocks.materials[id]
-		materialOf[id] = (Enum.Material :: any)[name]
+		local material = (Enum.Material :: any)[name]
+		assert(material ~= nil, string.format("block %s is mapped to unknown Terrain material %s", tostring(Blocks.names[id]), tostring(name)))
+		materialOf[id] = material
 	end
 
 	local self = setmetatable({
 		terrain = terrain,
-		root = root,
 		config = config,
 		materialOf = materialOf,
 		pool = {} :: { [number]: any }, -- reusable WriteVoxels tables, by run length in sections
@@ -94,6 +72,23 @@ function ChunkWriter.applyGlobals(config: WriterConfig)
 		for matName, rgb in Blocks.colors do
 			local mat = (Enum.Material :: any)[matName]
 			terrain:SetMaterialColor(mat, Color3.fromRGB(rgb[1], rgb[2], rgb[3]))
+		end
+	end
+	if config.variants and next(config.variants) ~= nil then
+		-- MaterialVariants (custom textures) for Terrain base materials; needs the variants to exist in MaterialService
+		local ok, MaterialService = pcall(function()
+			return game:GetService("MaterialService")
+		end)
+		if ok then
+			for matName, variant in config.variants do
+				local mat = (Enum.Material :: any)[matName]
+				local applied, err = pcall(function()
+					(MaterialService :: any):SetBaseMaterialOverride(mat, variant)
+				end)
+				if not applied then
+					warn("[TerrainGenerator] could not apply MaterialVariant " .. variant .. " to " .. matName .. ": " .. tostring(err))
+				end
+			end
 		end
 	end
 end
@@ -229,61 +224,9 @@ local function writeRun(self: any, chunk: any, s0: number, n: number)
 	self.terrain:WriteVoxels(region, VOXEL, mats, occs)
 end
 
-local function partColor(c: any): Color3
-	local rgb
-	if c.kind == "Tree" then
-		rgb = TREE_COLORS[c.species] or TREE_COLORS.default
-	else
-		rgb = ORE_COLORS[c.ore] or { 200, 200, 200 }
-	end
-	return Color3.fromRGB(rgb[1], rgb[2], rgb[3])
-end
-
-local function makeCollectables(self: any, chunk: any, maybeYield: () -> ())
-	local list = chunk.collectables
-	if not self.config.collectables or #list == 0 or not self.root then
-		return
-	end
-	local folder = Instance.new("Folder")
-	folder.Name = string.format("Chunk_%d_%d", chunk.cx, chunk.cz)
-	local baseY = self.config.bedrockLevel
-	local size = self.config.partSize
-	local colorParts = self.config.colorParts
-	for _, c in list do
-		local part = Instance.new("Part")
-		local px, py, pz
-		if c.kind == "Tree" then
-			-- x, z are block indices; y is the first air block above the ground: stand the part on the ground
-			px, py, pz = (c.x + 0.5) * VOXEL, baseY + (c.y - MIN_Y + 0.5) * VOXEL, (c.z + 0.5) * VOXEL
-			part.Name = "Tree"
-			part:SetAttribute("Species", c.species)
-			part:SetAttribute("Biome", c.biome)
-			part:SetAttribute("Height", c.height)
-		else
-			px, py, pz = c.x * VOXEL, baseY + (c.y - MIN_Y) * VOXEL, c.z * VOXEL
-			part.Name = "Ore_" .. tostring(c.tier)
-			part:SetAttribute("OreType", c.ore)
-			part:SetAttribute("Tier", c.tier)
-			part:SetAttribute("Size", c.count)
-		end
-		part.Anchored = true
-		part.CanCollide = false
-		part.CanTouch = false
-		part.CastShadow = false
-		part.Locked = true
-		part.Size = size
-		part.Position = Vector3.new(px, py, pz)
-		if colorParts then
-			part.Color = partColor(c)
-		end
-		part.Parent = folder
-		maybeYield() -- parts are built off-tree, so yielding here never shows a half-built chunk
-	end
-	folder.Parent = self.root
-end
-
--- Writes a whole chunk. Serial phase only.
-function ChunkWriter.write(self: any, chunk: any)
+-- Writes a whole chunk. Serial phase only. Returns the height in studs (above the world floor) that now holds
+-- terrain; pass it to unload so removing the chunk only clears that much.
+function ChunkWriter.write(self: any, chunk: any): number
 	local blocks: buffer, occ: buffer? = chunk.blocks, chunk.occ
 	local terrain = self.terrain
 	local baseY = self.config.bedrockLevel
@@ -291,8 +234,13 @@ function ChunkWriter.write(self: any, chunk: any)
 	local z0 = chunk.cz * CHUNK_STUDS
 
 	local kind = table.create(SECTIONS, -1)
+	local topSection = -1
 	for s = 0, SECTIONS - 1 do
-		kind[s + 1] = sectionUniform(blocks, occ, s)
+		local k = sectionUniform(blocks, occ, s)
+		kind[s + 1] = k
+		if k ~= AIR then
+			topSection = s
+		end
 	end
 
 	local budget = (self.config.writeBudgetMs or math.huge) / 1000
@@ -330,24 +278,20 @@ function ChunkWriter.write(self: any, chunk: any)
 			s = e + 1
 		end
 	end
-	makeCollectables(self, chunk, maybeYield)
+	return (topSection + 1) * SECTION * VOXEL
 end
 
--- Removes a chunk's terrain column and collectables. Main thread.
-function ChunkWriter.unload(self: any, cx: number, cz: number)
-	local baseY = self.config.bedrockLevel
-	local height = HEIGHT * VOXEL
+-- Removes a chunk's terrain column. `topStuds` = what write() returned (nil = clear the whole height). Main thread.
+function ChunkWriter.unload(self: any, cx: number, cz: number, topStuds: number?)
+	local height = topStuds or HEIGHT * VOXEL
+	if height <= 0 then
+		return
+	end
 	self.terrain:FillBlock(
-		CFrame.new(cx * CHUNK_STUDS + CHUNK_STUDS / 2, baseY + height / 2, cz * CHUNK_STUDS + CHUNK_STUDS / 2),
+		CFrame.new(cx * CHUNK_STUDS + CHUNK_STUDS / 2, self.config.bedrockLevel + height / 2, cz * CHUNK_STUDS + CHUNK_STUDS / 2),
 		Vector3.new(CHUNK_STUDS, height, CHUNK_STUDS),
 		Enum.Material.Air
 	)
-	if self.root then
-		local f = self.root:FindFirstChild(string.format("Chunk_%d_%d", cx, cz))
-		if f then
-			f:Destroy()
-		end
-	end
 end
 
 return ChunkWriter

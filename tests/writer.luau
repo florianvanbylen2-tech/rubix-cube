@@ -6,7 +6,7 @@ local Settings = require(TG.Data.Settings)
 local H, MINY = Settings.height, Settings.minY
 
 local BASE = 64 -- bedrock level (studs) other than 0 to test the offset handling
-local cfg = { bedrockLevel = BASE, folderName = "GeneratedCollectables", collectables = true, partSize = Vector3.new(4, 4, 4), colorParts = true, applyColors = true, writeBudgetMs = math.huge }
+local cfg = { bedrockLevel = BASE, applyColors = true, writeBudgetMs = math.huge }
 ChunkWriter.applyGlobals(cfg)
 local writer = ChunkWriter.new(cfg)
 local gen = ChunkGenerator.new(12345)
@@ -16,7 +16,7 @@ for _, c in { { 5, -3 }, { 0, 0 }, { -30, 12 } } do
 	local chunk = gen:generate(c[1], c[2])
 	local t0 = os.clock()
 	local f0, w0 = MOCK.terrain.fills, MOCK.terrain.writes
-	writer:write(chunk)
+	local topStuds = writer:write(chunk)
 	local dt = (os.clock() - t0) * 1000
 	local voxels = MOCK.terrain.voxels
 	-- compare with expected
@@ -54,18 +54,18 @@ for _, c in { { 5, -3 }, { 0, 0 }, { -30, 12 } } do
 			end
 		end
 	end end
-	local folder = MOCK.terrain.Parent:FindFirstChild("GeneratedCollectables"):FindFirstChild(string.format("Chunk_%d_%d", c[1], c[2]))
-	local parts = folder and #folder:GetChildren() or 0
-	print(string.format("chunk (%d,%d): %d voxels checked, %d mismatches, %d partial-occupancy voxels; FillBlock x%d, WriteVoxels x%d, %.0f ms; collectable parts %d/%d",
-		c[1], c[2], checked, bad, partial, MOCK.terrain.fills - f0, MOCK.terrain.writes - w0, dt, parts, #chunk.collectables))
+	print(string.format("chunk (%d,%d): %d voxels checked, %d mismatches, %d partial-occupancy voxels; FillBlock x%d, WriteVoxels x%d, %.0f ms; written height %d studs",
+		c[1], c[2], checked, bad, partial, MOCK.terrain.fills - f0, MOCK.terrain.writes - w0, dt, topStuds))
 	assert(bad == 0, "voxel mismatch")
-	assert(parts == #chunk.collectables)
-	if folder then
-		local p = folder:GetChildren()[1]
-		print("   sample part:", p.Name, p.Position.X, p.Position.Y, p.Position.Z, p:GetAttribute("Species") or p:GetAttribute("OreType"), p:GetAttribute("Tier"))
+	-- the reported height covers every voxel that was written (so unload clears everything)
+	for k in MOCK.terrain.voxels do
+		local x, y, z = string.match(k, "(-?%d+),(-?%d+),(-?%d+)")
+		if tonumber(x) >= c[1] * 16 and tonumber(x) < c[1] * 16 + 16 and tonumber(z) >= c[2] * 16 and tonumber(z) < c[2] * 16 + 16 then
+			assert((tonumber(y) :: number) * 4 - BASE < topStuds, "voxel above the reported height")
+		end
 	end
 	-- unload
-	writer:unload(c[1], c[2])
+	writer:unload(c[1], c[2], topStuds)
 	local left = 0
 	for k in MOCK.terrain.voxels do
 		local x, y, z = string.match(k, "(-?%d+),(-?%d+),(-?%d+)")
@@ -73,7 +73,6 @@ for _, c in { { 5, -3 }, { 0, 0 }, { -30, 12 } } do
 		if x >= c[1] * 16 and x < c[1] * 16 + 16 and z >= c[2] * 16 and z < c[2] * 16 + 16 then left += 1 end
 	end
 	assert(left == 0, "voxels left after unload: " .. left)
-	assert(MOCK.terrain.Parent:FindFirstChild("GeneratedCollectables"):FindFirstChild(string.format("Chunk_%d_%d", c[1], c[2])) == nil, "folder not removed")
 end
 print("material colours applied:", (function() local n = 0 for _ in MOCK.terrain.colors do n += 1 end return n end)())
 print("writer OK")
