@@ -99,6 +99,7 @@ Shrine. `TerrainGenerator.GetThingNames()` lists them all.
 | `Decoration` | `false` | Terrain grass blades (`false` is a big client FPS saver) |
 | `Streaming.UnloadMargin` | `2` | chunks kept around each window before unloading (prevents flicker) |
 | `Streaming.AdaptiveLoad`, `TargetFrameMs` | `true`, `25` | fewer concurrent jobs, or a pause, while frames are slow |
+| `Server.Width`, `Length` | `nil` | how far around each player the *server* places things (nil = `Width`/`Length`; smaller = less server CPU) |
 | `Workers.Enabled/Count/SliceMs` | `true`, `3`, `6` | server workers (they only compute where things go) |
 | `Client.Workers/SliceMs/WriteBudgetMs` | `2`, `4`, `2` | per-client workers, ms of work per frame per worker, ms of Terrain writes per frame |
 | `Placement.Print`, `MaxPrintsPerSecond` | `true`, `40` | the placeholder printing |

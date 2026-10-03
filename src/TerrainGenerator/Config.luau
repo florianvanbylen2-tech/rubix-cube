@@ -38,6 +38,7 @@ export type Config = {
 		AdaptiveLoad: boolean,
 		TargetFrameMs: number,
 	},
+	Server: { Width: number?, Length: number? },
 	Workers: { Enabled: boolean, Count: number, SliceMs: number },
 	Client: { Workers: number, SliceMs: number, WriteBudgetMs: number, MaxChunksInFlight: number, Width: number?, Length: number? },
 
@@ -118,6 +119,13 @@ local Config: Config = {
 		WriteBudgetMs = 3, -- TerrainMode "Server": terrain writes yield to the next frame after this many ms
 		AdaptiveLoad = true, -- fewer concurrent chunk jobs (or a pause) while frames are slow
 		TargetFrameMs = 25, -- ... i.e. when frames take longer than this (25 ms = 40 fps)
+	},
+
+	-- How far around every player the SERVER places trees, ores and structures (nil = Width / Length above).
+	-- Smaller = less server CPU; things beyond this distance do not exist yet when a client already draws the terrain.
+	Server = {
+		Width = nil,
+		Length = nil,
 	},
 
 	-- Server-side generation workers (Parallel Luau Actors). They compute where trees, ores and structures go.

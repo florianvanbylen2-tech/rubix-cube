@@ -34,6 +34,8 @@ echo "spawn rules (Enabled / Biomes / Rate / Extra / custom things)"
 run tests/placements.luau --codegen | tail -1
 echo "biome removal and custom blocks"
 run tests/biomes_custom.luau --codegen | tail -1
+echo "worker pool with emulated Actors (server-style and client-style workers)"
+run tests/pool.luau --codegen | tail -1
 echo "client/server split end to end against mocked Roblox services (locks, LoadChunk, late join, spawn, pig)"
 run tests/system.luau --codegen | tail -1
 echo "load governor"

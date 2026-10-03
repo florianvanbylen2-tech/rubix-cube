@@ -149,8 +149,8 @@ function Server.start(env: any): any
 	end
 
 	-- ------------------------------------------------------------------------------------ the world
-	local rx = math.max(1, math.ceil(cfg.Width / CHUNK / 2))
-	local rz = math.max(1, math.ceil(cfg.Length / CHUNK / 2))
+	local rx = math.max(1, math.ceil((cfg.Server.Width or cfg.Width) / CHUNK / 2))
+	local rz = math.max(1, math.ceil((cfg.Server.Length or cfg.Length) / CHUNK / 2))
 
 	local function onPoolDone(jobId: number, cx: number, cz: number, ok: boolean, err: string?, placements: any, top: number?)
 		task.spawn(function()
@@ -186,7 +186,7 @@ function Server.start(env: any): any
 	local remote = Instance.new("RemoteEvent")
 	remote.Name = "ClientReady"
 	remote.Parent = stateFolder
-	stateFolder:SetAttribute("Config", Shared.serialize(cfg, env.customBiomes))
+	Shared.publishConfig(stateFolder, Shared.serialize(cfg, env.customBiomes))
 	stateFolder:SetAttribute("Spawn", spawnGround)
 	state = stateFolder
 	locksDirty = true
@@ -299,7 +299,12 @@ function Server.start(env: any): any
 		end)
 	end
 
+	local watched: { [Player]: boolean } = {}
 	local function watchPlayer(player: Player)
+		if watched[player] then
+			return
+		end
+		watched[player] = true
 		table.insert(
 			connections,
 			player.CharacterAdded:Connect(function(character: Model)
@@ -346,6 +351,7 @@ function Server.start(env: any): any
 		Players.PlayerRemoving:Connect(function(player: Player)
 			manager:removePlayer(tostring(player.UserId))
 			clientReady[player] = nil
+			watched[player] = nil
 		end)
 	)
 	for _, player in Players:GetPlayers() do

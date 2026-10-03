@@ -35,7 +35,7 @@ function Client.start(env: any): any
 	while not state:GetAttribute("Ready") do
 		task.wait(0.1)
 	end
-	local customBiomes = Shared.apply(cfg, state:GetAttribute("Config") :: string)
+	local customBiomes = Shared.apply(cfg, Shared.readConfig(state))
 	env.setCustomBiomes(customBiomes)
 	local blocksSpec = Shared.blocksSpec(cfg)
 	Blocks.configure(blocksSpec)

@@ -153,4 +153,47 @@ check(p1.loads == loads0 + 1, "player should respawn after RespawnTime")
 -- ---------------------------------------------------------------- stop
 TerrainGenerator.Stop()
 check(MOCK.RS:FindFirstChild("TerrainGeneratorState") == nil, "state folder should be removed on stop")
+-- ---------------------------------------------------------------- TerrainMode "Server": the server writes the terrain
+MOCK.terrain:Clear()
+C.TerrainMode = "Server"
+C.Width, C.Length = 192, 192             -- 3x3 chunks per player, 4x4 start-up area
+placed = {}
+removed = {}
+MOCK.setPosition(p1, 0, 0)
+local up2 = false
+task.spawn(function() TerrainGenerator.StartServer(); up2 = true end)
+run(120)
+check(up2, "server (Server terrain mode) did not start")
+check(count(MOCK.terrain.voxels) > 0, "in Server terrain mode the server must write the terrain")
+check(#placed > 0, "things are placed in Server terrain mode too")
+local sc = TerrainGenerator.GetSpawnPoint()
+local scx, scz = TerrainGenerator.WorldToChunk(sc)
+local lone
+for x = -2, 1 do for z = -2, 1 do
+	if math.abs(x - scx + 0.5) > 1 or math.abs(z - scz + 0.5) > 1 then lone = lone or { x, z } end
+end end
+check(lone and chunkVoxels(lone[1], lone[2]) > 0, "start-up area chunk missing")
+local c2
+local nullSignals = { chunkLoaded = { Fire = function() end }, chunkUnloaded = { Fire = function() end }, spawn = { Fire = function() end } }
+task.spawn(function() c2 = Client.start({ Config = C, module = TG, signals = nullSignals, setCustomBiomes = function() end }) end)
+run(10)
+check(c2 and c2.stats().loaded == 0, "the client must not draw terrain in Server terrain mode")
+MOCK.setPosition(p1, 64 * 50, 0)
+run(150)
+check(chunkVoxels(lone[1], lone[2]) == 0, "the server must unload terrain nobody needs (using the height it wrote)")
+check(chunkVoxels(50, 0) > 0, "terrain around the moved player")
+c2.stop()
+TerrainGenerator.Stop()
+print("Server terrain mode: written by the server, unloaded after the player left, client only runs the pig")
+do -- long configs are split into attribute parts and reassemble exactly
+	local Shared = require(TG.Runtime.Shared)
+	local st = Instance.new("Folder")
+	local big = string.rep('{"a":"0123456789"}', 12000) -- 216 000 characters
+	Shared.publishConfig(st, big)
+	check(st:GetAttribute("ConfigParts") >= 4 and st:GetAttribute("Config") == nil, "long config should be split")
+	check(Shared.readConfig(st) == big, "split config must reassemble")
+	local st2 = Instance.new("Folder")
+	Shared.publishConfig(st2, "{}")
+	check(Shared.readConfig(st2) == "{}", "short config stays in one attribute")
+end
 print("system OK")

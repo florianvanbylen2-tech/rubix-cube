@@ -113,6 +113,33 @@ function Shared.apply(cfg: any, json: string): { any }
 	return data.CustomBiomes or {}
 end
 
+-- The config JSON travels as attributes too; long strings are split ("Config" or "ConfigParts" + "Config_<i>").
+local CONFIG_PART = 50000
+
+function Shared.publishConfig(state: Instance, json: string)
+	if #json <= CONFIG_PART then
+		state:SetAttribute("Config", json)
+		return
+	end
+	local n = math.ceil(#json / CONFIG_PART)
+	for i = 1, n do
+		state:SetAttribute("Config_" .. i, string.sub(json, (i - 1) * CONFIG_PART + 1, i * CONFIG_PART))
+	end
+	state:SetAttribute("ConfigParts", n)
+end
+
+function Shared.readConfig(state: Instance): string
+	local n = state:GetAttribute("ConfigParts")
+	if type(n) ~= "number" then
+		return state:GetAttribute("Config") :: string
+	end
+	local parts: { string } = {}
+	for i = 1, n do
+		parts[i] = state:GetAttribute("Config_" .. i) :: string
+	end
+	return table.concat(parts)
+end
+
 -- Lock sets travel as attributes on the state folder: "LocksActive" = "<version>:<parts>" and "Locks_<version>_<i>".
 function Shared.publishLocks(state: Instance, parts: { string }, version: number)
 	local previous = state:GetAttribute("LocksActive")

@@ -61,7 +61,8 @@ local sleepers = {}
 local function resume(co, ...)
 	local ok, wake = coroutine.resume(co, ...)
 	if not ok then error(wake, 0) end
-	if coroutine.status(co) == "suspended" then table.insert(sleepers, { co = co, at = wake or now }) end
+	-- task.wait yields its wake-up time; a raw coroutine.yield() stays suspended until somebody resumes it
+	if coroutine.status(co) == "suspended" and type(wake) == "number" then table.insert(sleepers, { co = co, at = wake }) end
 end
 task = {
 	spawn = function(f, ...)
@@ -101,6 +102,10 @@ Instance_.__newindex = function(t, k, v)
 		if v then table.insert(v._children, t) end
 	else
 		t._props[k] = v
+		-- a Script / LocalScript that gets enabled "runs" (tests install MOCK.onScriptEnabled to emulate the stub)
+		if k == "Disabled" and v == false and (rawget(t, "ClassName") == "Script" or rawget(t, "ClassName") == "LocalScript") and MOCK.onScriptEnabled then
+			MOCK.onScriptEnabled(t)
+		end
 	end
 end
 function Instance_.FindFirstChild(self, name) for _, c in self._children do if c.Name == name then return c end end return nil end
@@ -124,6 +129,7 @@ function Instance_.SetAttribute(self, k, v)
 end
 function Instance_.GetAttribute(self, k) return self._attrs[k] end
 function Instance_.GetChildren(self) return table.clone(self._children) end
+function Instance_.GetActor(self) local p = self while p do if p.ClassName == "Actor" then return p end p = rawget(p, "_parent") end return nil end
 function Instance_.Clone(self)
 	local c = Instance.new(self.ClassName)
 	c.Name = self.Name
@@ -139,6 +145,10 @@ Instance = { new = function(class)
 		local sig = newSignal()
 		o._props.Event = sig
 		o._props.Fire = function(_, ...) sig:Fire(...) end
+	elseif class == "Actor" then
+		local bindings = {}
+		o._props.BindToMessageParallel = function(_, name, fn) bindings[name] = fn end
+		o._props.SendMessage = function(_, name, ...) local fn = bindings[name] assert(fn, "no handler for " .. name) task.spawn(fn, ...) end
 	elseif class == "RemoteEvent" then
 		o._signals.OnServerEvent = newSignal()
 		o._props.FireServer = function(self, ...) self._signals.OnServerEvent:Fire(MOCK.localPlayer, ...) end

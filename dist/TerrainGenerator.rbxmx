@@ -505,6 +505,7 @@ export type Config = {
 		AdaptiveLoad: boolean,
 		TargetFrameMs: number,
 	},
+	Server: { Width: number?, Length: number? },
 	Workers: { Enabled: boolean, Count: number, SliceMs: number },
 	Client: { Workers: number, SliceMs: number, WriteBudgetMs: number, MaxChunksInFlight: number, Width: number?, Length: number? },
 
@@ -585,6 +586,13 @@ local Config: Config = {
 		WriteBudgetMs = 3, -- TerrainMode "Server": terrain writes yield to the next frame after this many ms
 		AdaptiveLoad = true, -- fewer concurrent chunk jobs (or a pause) while frames are slow
 		TargetFrameMs = 25, -- ... i.e. when frames take longer than this (25 ms = 40 fps)
+	},
+
+	-- How far around every player the SERVER places trees, ores and structures (nil = Width / Length above).
+	-- Smaller = less server CPU; things beyond this distance do not exist yet when a client already draws the terrain.
+	Server = {
+		Width = nil,
+		Length = nil,
 	},
 
 	-- Server-side generation workers (Parallel Luau Actors). They compute where trees, ores and structures go.
@@ -3049,7 +3057,7 @@ function Client.start(env: any): any
 	while not state:GetAttribute("Ready") do
 		task.wait(0.1)
 	end
-	local customBiomes = Shared.apply(cfg, state:GetAttribute("Config") :: string)
+	local customBiomes = Shared.apply(cfg, Shared.readConfig(state))
 	env.setCustomBiomes(customBiomes)
 	local blocksSpec = Shared.blocksSpec(cfg)
 	Blocks.configure(blocksSpec)
@@ -3403,8 +3411,8 @@ function Server.start(env: any): any
 	end
 
 	-- ------------------------------------------------------------------------------------ the world
-	local rx = math.max(1, math.ceil(cfg.Width / CHUNK / 2))
-	local rz = math.max(1, math.ceil(cfg.Length / CHUNK / 2))
+	local rx = math.max(1, math.ceil((cfg.Server.Width or cfg.Width) / CHUNK / 2))
+	local rz = math.max(1, math.ceil((cfg.Server.Length or cfg.Length) / CHUNK / 2))
 
 	local function onPoolDone(jobId: number, cx: number, cz: number, ok: boolean, err: string?, placements: any, top: number?)
 		task.spawn(function()
@@ -3440,7 +3448,7 @@ function Server.start(env: any): any
 	local remote = Instance.new("RemoteEvent")
 	remote.Name = "ClientReady"
 	remote.Parent = stateFolder
-	stateFolder:SetAttribute("Config", Shared.serialize(cfg, env.customBiomes))
+	Shared.publishConfig(stateFolder, Shared.serialize(cfg, env.customBiomes))
 	stateFolder:SetAttribute("Spawn", spawnGround)
 	state = stateFolder
 	locksDirty = true
@@ -3553,7 +3561,12 @@ function Server.start(env: any): any
 		end)
 	end
 
+	local watched: { [Player]: boolean } = {}
 	local function watchPlayer(player: Player)
+		if watched[player] then
+			return
+		end
+		watched[player] = true
 		table.insert(
 			connections,
 			player.CharacterAdded:Connect(function(character: Model)
@@ -3600,6 +3613,7 @@ function Server.start(env: any): any
 		Players.PlayerRemoving:Connect(function(player: Player)
 			manager:removePlayer(tostring(player.UserId))
 			clientReady[player] = nil
+			watched[player] = nil
 		end)
 	)
 	for _, player in Players:GetPlayers() do
@@ -3854,6 +3868,33 @@ function Shared.apply(cfg: any, json: string): { any }
 	end
 	cfg.Materials = { Blocks = m.Blocks or {}, Variants = m.Variants or {}, Custom = m.Custom or {}, Colors = colors }
 	return data.CustomBiomes or {}
+end
+
+-- The config JSON travels as attributes too; long strings are split ("Config" or "ConfigParts" + "Config_<i>").
+local CONFIG_PART = 50000
+
+function Shared.publishConfig(state: Instance, json: string)
+	if #json <= CONFIG_PART then
+		state:SetAttribute("Config", json)
+		return
+	end
+	local n = math.ceil(#json / CONFIG_PART)
+	for i = 1, n do
+		state:SetAttribute("Config_" .. i, string.sub(json, (i - 1) * CONFIG_PART + 1, i * CONFIG_PART))
+	end
+	state:SetAttribute("ConfigParts", n)
+end
+
+function Shared.readConfig(state: Instance): string
+	local n = state:GetAttribute("ConfigParts")
+	if type(n) ~= "number" then
+		return state:GetAttribute("Config") :: string
+	end
+	local parts: { string } = {}
+	for i = 1, n do
+		parts[i] = state:GetAttribute("Config_" .. i) :: string
+	end
+	return table.concat(parts)
 end
 
 -- Lock sets travel as attributes on the state folder: "LocksActive" = "<version>:<parts>" and "Locks_<version>_<i>".
@@ -4253,7 +4294,7 @@ local Settings = require(script.Parent.Parent.Data.Settings)
 local HEIGHT = Settings.height
 local SECTION = 16
 local SECTIONS = HEIGHT // SECTION
-local MAX_RUN = 4 -- sections per WriteVoxels call (bounds the time of one engine call and of building its tables)
+local MAX_RUN = 2 -- sections per WriteVoxels call (bounds the time of one engine call and of building its tables)
 local VOXEL = 4
 local CHUNK_STUDS = 16 * VOXEL
 local AIR = Blocks.AIR
