@@ -51,6 +51,7 @@ export type Config = {
 	Biomes: { Disabled: { string } },
 	Materials: { Blocks: { [string]: string }, Colors: { [string]: Color3 }, Variants: { [string]: string }, Custom: { any } },
 
+	SpawnHub: { Enabled: boolean, Size: number, WallHeight: number, SafeMargin: number, KingName: string, Strike: { Damage: number, Cooldown: number, Knockback: number, StunSeconds: number, AttackRange: number } },
 	Mobs: { Pig: boolean },
 	Spawn: { AutoSpawn: boolean, ReadyRadiusChunks: number },
 }
@@ -236,6 +237,19 @@ local Config: Config = {
 		Colors = {},
 		Variants = {},
 		Custom = {},
+	},
+
+	-- The spawn hall: a building at the spawn point where everyone spawns. It is a safe zone (nobody can be hurt inside),
+	-- and King Jeffry strikes anyone who attacks someone in there with lightning. Roblox has no built-in combat, so
+	-- attacks are detected by TerrainGenerator.ReportAttack(attacker, victim) (call it from your weapons), by health
+	-- loss inside the zone (classic `creator` tag) and by tool swings next to somebody inside (AttackRange studs).
+	SpawnHub = {
+		Enabled = true,
+		Size = 56, -- studs, square hall
+		WallHeight = 18,
+		SafeMargin = 8, -- the safe zone reaches this far past the walls
+		KingName = "Jeffry",
+		Strike = { Damage = 40, Cooldown = 3, Knockback = 60, StunSeconds = 1.2, AttackRange = 14 },
 	},
 
 	Mobs = {

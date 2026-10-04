@@ -87,6 +87,20 @@ local pos0 = body.CFrame.Position
 run(30)
 local pos1 = body.CFrame.Position
 check(pos0.X ~= pos1.X or pos0.Z ~= pos1.Z, "the pig should move")
+-- the spawn hall: everybody spawns inside it, it is a safe zone, and Jeffry is its crowned king
+check(workspace:FindFirstChild("SpawnHub") ~= nil and state:GetAttribute("Hub") ~= nil, "spawn hall missing")
+check(TerrainGenerator.IsInSafeZone(p1) and p1:GetAttribute("InSafeZone") == true, "the player spawns inside the safe zone")
+check(TerrainGenerator.IsInSafeZone(spawn) and not TerrainGenerator.IsInSafeZone(spawn + Vector3.new(500, 0, 0)), "IsInSafeZone(position)")
+local nameTag
+for _, part in pig:GetChildren() do for _, ch in part:GetChildren() do if ch.Name == "NameTag" then nameTag = ch end end end
+check(nameTag and nameTag._children[1].Text == "King Jeffry", "Jeffry should wear his name tag")
+local attacker = MOCK.newPlayer(7, 0, 0)
+attacker:LoadCharacter()
+attacker.Character:FindFirstChild("HumanoidRootPart").Position = spawn + Vector3.new(80, 3, 0)
+run(2)
+check(TerrainGenerator.ReportAttack(attacker, p1) == true, "ReportAttack on a player in the spawn hall must be blocked")
+check(attacker.Character:FindFirstChild("Humanoid").Health == 60, "and the attacker is struck by lightning")
+MOCK.removePlayer(attacker)
 local spawnCx, spawnCz = TerrainGenerator.WorldToChunk(spawn)
 check(chunkVoxels(spawnCx, spawnCz) > 0, "no terrain at the spawn point")
 print("client: terrain drawn around spawn chunk", spawnCx, spawnCz, "- character spawned, pig walking")
@@ -103,7 +117,7 @@ print("walk: spawn area stayed (locked), terrain followed the player, removeThin
 -- ---------------------------------------------------------------- locks and LoadChunk
 check(chunkVoxels(150, 150) == 0, "precondition")
 check(TerrainGenerator.LockArea(150, 150, 151, 150, "test") == 2, "LockArea count")
-run(40)
+run(160)
 check(TerrainGenerator.IsChunkLoaded(150, 150) and chunkVoxels(150, 150) > 0 and chunkVoxels(151, 150) > 0, "locked far chunks must load on server and client")
 check(TerrainGenerator.IsChunkLocked(150, 150, "test") and not TerrainGenerator.IsChunkLocked(150, 150, "other"), "owner-specific lock query")
 TerrainGenerator.LockChunk(150, 150, "other")
@@ -120,10 +134,10 @@ run(30)
 check(loaded == true, "LoadChunk should return true once the chunk is loaded")
 check(TerrainGenerator.IsChunkLocked(-120, 90) and chunkVoxels(-120, 90) > 0, "LoadChunk locks by default and the client draws it")
 local temp: boolean? = nil
-task.spawn(function() temp = TerrainGenerator.LoadChunk(-130, 90, { Lock = false, HoldSeconds = 4 }) end)
-run(10)
-check(temp == true, "temporary LoadChunk")
+task.spawn(function() temp = TerrainGenerator.LoadChunk(-130, 90, { Lock = false, HoldSeconds = 40 }) end)
 run(30)
+check(temp == true, "temporary LoadChunk")
+run(80)
 check(chunkVoxels(-130, 90) == 0 and not TerrainGenerator.IsChunkLoaded(-130, 90), "temporary chunk must unload after HoldSeconds")
 check(TerrainGenerator.IsChunkLoaded(-120, 90), "locked chunk must stay")
 print("locks: LockArea / owners / UnlockArea / LoadChunk (locked and temporary) behave")

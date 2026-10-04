@@ -19,6 +19,7 @@ local Queries = require(script.Parent.Parent.World.Queries)
 local Blocks = require(script.Parent.Parent.World.Blocks)
 local Settings = require(script.Parent.Parent.Data.Settings)
 local Shared = require(script.Parent.Shared)
+local SpawnHub = require(script.Parent.SpawnHub)
 
 local MIN_Y = Settings.minY
 local SEA_LEVEL = Settings.seaLevel
@@ -28,7 +29,7 @@ local CHUNK = 16 * VOXEL
 local Server = {}
 
 -- Finds dry land near (0, 0): returns block x, z and the y of the ground block, searching in growing square rings.
-local function findSpawn(gen: any): (number, number, number)
+local function findSpawn(gen: any, flat: boolean): (number, number, number)
 	local bestX, bestZ, bestY = 0, 0, -math.huge
 	local evaluated = 0
 	for ring = 0, 32 do
@@ -47,7 +48,18 @@ local function findSpawn(gen: any): (number, number, number)
 		for _, p in points do
 			local y = Queries.surfaceY(gen, p[1], p[2])
 			if y >= SEA_LEVEL + 2 then
-				return p[1], p[2], y
+				if not flat then
+					return p[1], p[2], y
+				end
+				-- the hall needs level ground: its corners may differ by at most 3 blocks
+				local lo, hi = y, y
+				for _, c in { { -8, -8 }, { 8, -8 }, { -8, 8 }, { 8, 8 } } do
+					local cy = Queries.surfaceY(gen, p[1] + c[1], p[2] + c[2])
+					lo, hi = math.min(lo, cy), math.max(hi, cy)
+				end
+				if hi - lo <= 3 and lo >= SEA_LEVEL + 1 then
+					return p[1], p[2], y
+				end
 			end
 			if y > bestY then
 				bestX, bestZ, bestY = p[1], p[2], y
@@ -173,7 +185,7 @@ function Server.start(env: any): any
 
 	-- 1. generator for queries + spawn point (before anything is published)
 	local queryGen = env.getQueryGenerator()
-	local sbx, sbz, sby = findSpawn(queryGen)
+	local sbx, sbz, sby = findSpawn(queryGen, cfg.SpawnHub.Enabled)
 	local spawnGround = Vector3.new((sbx + 0.5) * VOXEL, base + (sby - MIN_Y + 1) * VOXEL, (sbz + 0.5) * VOXEL)
 	ctl.spawnPoint = spawnGround
 	local spawnChunkX, spawnChunkZ = math.floor(sbx / 16), math.floor(sbz / 16)
@@ -188,6 +200,12 @@ function Server.start(env: any): any
 	remote.Parent = stateFolder
 	Shared.publishConfig(stateFolder, Shared.serialize(cfg, env.customBiomes))
 	stateFolder:SetAttribute("Spawn", spawnGround)
+	local strikeRemote = Instance.new("RemoteEvent")
+	strikeRemote.Name = "KingStrike"
+	strikeRemote.Parent = stateFolder
+	if cfg.SpawnHub.Enabled then
+		stateFolder:SetAttribute("Hub", spawnGround)
+	end
 	state = stateFolder
 	locksDirty = true
 	flushLocks()
@@ -204,6 +222,11 @@ function Server.start(env: any): any
 		end)
 	)
 	env.deployClient()
+
+	-- the spawn hall (server-side parts, so every client sees it): safe zone + King Jeffry's lightning
+	if cfg.SpawnHub.Enabled then
+		ctl.hub = SpawnHub.start({ Config = cfg, center = spawnGround, strikeRemote = strikeRemote })
+	end
 
 	-- 3. generation pool + manager
 	writer = if clientMode then nil else ChunkWriter.new(Shared.writerConfig(cfg, cfg.Streaming.WriteBudgetMs))
@@ -333,10 +356,10 @@ function Server.start(env: any): any
 		pad.Anchored = true
 		pad.CanCollide = false
 		pad.Transparency = 1
-		pad.Size = Vector3.new(6, 1, 6)
+		pad.Size = if cfg.SpawnHub.Enabled then Vector3.new(14, 1, 14) else Vector3.new(6, 1, 6)
 		pad.Neutral = true
 		pad.Duration = 0
-		pad.Position = spawnGround + Vector3.new(0, 0.5, 0)
+		pad.Position = spawnGround + (if cfg.SpawnHub.Enabled then Vector3.new(0, 0.5, 10) else Vector3.new(0, 0.5, 0))
 		pad.Parent = workspace
 		ctl.pad = pad
 	end
@@ -467,8 +490,25 @@ function Server.start(env: any): any
 		return manager:isLoaded(cx, cz)
 	end
 
+	function ctl.reportAttack(attacker: Player, victim: Player): boolean
+		return ctl.hub ~= nil and ctl.hub.reportAttack(attacker, victim)
+	end
+
+	function ctl.isInSafeZone(subject: Player | Vector3): boolean
+		if ctl.hub == nil then
+			return false
+		end
+		if typeof(subject) == "Vector3" then
+			return ctl.hub.contains(subject)
+		end
+		return ctl.hub.isInside(subject)
+	end
+
 	function ctl.stop()
 		stopped = true
+		if ctl.hub then
+			ctl.hub.stop()
+		end
 		if heartbeat then
 			heartbeat:Disconnect()
 		end

@@ -312,6 +312,21 @@ function TerrainGenerator.LoadChunk(cx: number, cz: number, options: any?): bool
 	return serverCtl.loadChunk(cx, cz, options)
 end
 
+-- ---------------------------------------------------------------------------------------- spawn hall / safe zone
+-- Call this from your weapon scripts when `attacker` hurts (or tries to hurt) `victim`. When the victim stands in the
+-- spawn hall's safe zone the attack is blocked and King Jeffry strikes the attacker with lightning. Returns true when
+-- the attack was blocked (so you can skip your own damage). Server only; needs Config.SpawnHub.Enabled.
+function TerrainGenerator.ReportAttack(attacker: Player, victim: Player): boolean
+	serverOnly("ReportAttack")
+	return serverCtl ~= nil and serverCtl.reportAttack(attacker, victim)
+end
+
+-- Is the player (or the world position, in studs) inside the spawn hall's safe zone? Players also carry the
+-- attribute "InSafeZone" (true/false) for your UI.
+function TerrainGenerator.IsInSafeZone(subject: Player | Vector3): boolean
+	return serverCtl ~= nil and serverCtl.isInSafeZone(subject)
+end
+
 -- ---------------------------------------------------------------------------------------- streaming state
 -- Server: the chunk's things have been placed. Client: its terrain is drawn.
 function TerrainGenerator.IsChunkLoaded(cx: number, cz: number): boolean

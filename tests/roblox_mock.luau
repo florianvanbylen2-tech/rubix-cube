@@ -4,7 +4,11 @@
 
 -- ------------------------------------------------------------------ math types
 local V3 = {}
-V3.__index = V3
+V3.__index = function(t, k)
+	if k == "Magnitude" then return math.sqrt(t.X * t.X + t.Y * t.Y + t.Z * t.Z) end
+	if k == "Unit" then local m = math.sqrt(t.X * t.X + t.Y * t.Y + t.Z * t.Z) return setmetatable({ X = t.X / m, Y = t.Y / m, Z = t.Z / m }, V3) end
+	return rawget(V3, k)
+end
 local function vec(x, y, z) return setmetatable({ X = x, Y = y, Z = z }, V3) end
 V3.__add = function(a, b) return vec(a.X + b.X, a.Y + b.Y, a.Z + b.Z) end
 V3.__sub = function(a, b) return vec(a.X - b.X, a.Y - b.Y, a.Z - b.Z) end
@@ -12,6 +16,8 @@ V3.__mul = function(a, b) if type(b) == "number" then return vec(a.X * b, a.Y * 
 V3.__div = function(a, b) return vec(a.X / b, a.Y / b, a.Z / b) end
 V3.__eq = function(a, b) return a.X == b.X and a.Y == b.Y and a.Z == b.Z end
 Vector3 = { new = function(x, y, z) return vec(x or 0, y or 0, z or 0) end }
+Vector3.zero = vec(0, 0, 0)
+UDim2 = { fromScale = function(x, y) return { X = x, Y = y } end, fromOffset = function(x, y) return { X = x, Y = y } end }
 Vector2 = { new = function(x, y) return { X = x, Y = y } end }
 
 local CF = {}
@@ -26,6 +32,7 @@ CFrame = {
 		return setmetatable({ Position = vec(x, y, z) }, CF)
 	end,
 	Angles = function(_, yaw, _) return setmetatable({ Position = vec(0, 0, 0), Yaw = yaw }, CF) end,
+	lookAt = function(a, b) return setmetatable({ Position = a, LookAt = b }, CF) end,
 }
 Region3 = { new = function(a, b) return { Min = a, Max = b } end }
 local C3 = {}
@@ -34,11 +41,14 @@ RaycastParams = { new = function() return { IgnoreWater = false } end }
 Enum = {
 	Material = setmetatable({}, { __index = function(_, k) return "M." .. k end }),
 	RaycastFilterType = { Exclude = "Exclude", Include = "Include" },
+	NormalId = { Front = "Front" }, SurfaceType = { Smooth = "Smooth" }, HumanoidStateType = { Dead = "Dead" },
 }
+MOCK_INSTANCE_META = nil
 typeof = function(v)
 	if type(v) == "table" then
 		local m = getmetatable(v)
 		if m == V3 then return "Vector3" elseif m == CF then return "CFrame" elseif m == C3 then return "Color3" end
+		if m == MOCK_INSTANCE_META then return "Instance" end
 	end
 	return type(v)
 end
@@ -94,12 +104,19 @@ Instance_.__index = function(t, k)
 	for _, c in rawget(t, "_children") do if c.Name == k then return c end end
 	return nil
 end
+MOCK_INSTANCE_META = Instance_
 Instance_.__newindex = function(t, k, v)
+	if k == "Health" and rawget(t, "ClassName") == "Humanoid" then
+		local old = t._props.Health
+		t._props.Health = v
+		if old ~= v then t._signals.HealthChanged:Fire(v) end
+		return
+	end
 	if k == "Parent" then
 		local old = rawget(t, "_parent")
 		if old then for i, c in old._children do if c == t then table.remove(old._children, i) break end end end
 		rawset(t, "_parent", v)
-		if v then table.insert(v._children, t) end
+		if v then table.insert(v._children, t) v._signals.ChildAdded:Fire(t) end
 	else
 		t._props[k] = v
 		-- a Script / LocalScript that gets enabled "runs" (tests install MOCK.onScriptEnabled to emulate the stub)
@@ -121,6 +138,7 @@ function Instance_.WaitForChild(self, name, timeout)
 end
 function Instance_.Destroy(self) self.Parent = nil self._destroyed = true end
 function Instance_.IsDescendantOf(self, other) local p = self.Parent while p do if p == other then return true end p = p.Parent end return false end
+function Instance_.FindFirstChildOfClass(self, class) for _, c in self._children do if c.ClassName == class then return c end end return nil end
 function Instance_.IsA(self, class) return self.ClassName == class end
 function Instance_.SetAttribute(self, k, v)
 	local old = self._attrs[k]
@@ -139,7 +157,7 @@ function Instance_.Clone(self)
 	return c
 end
 Instance = { new = function(class)
-	local o = setmetatable({ _children = {}, _props = { Name = class }, _attrs = {}, _signals = { AttributeChanged = newSignal() }, ClassName = class }, Instance_)
+	local o = setmetatable({ _children = {}, _props = { Name = class }, _attrs = {}, _signals = { AttributeChanged = newSignal(), ChildAdded = newSignal() }, ClassName = class }, Instance_)
 	rawset(o, "ClassName", class)
 	if class == "BindableEvent" then
 		local sig = newSignal()
@@ -149,7 +167,16 @@ Instance = { new = function(class)
 		local bindings = {}
 		o._props.BindToMessageParallel = function(_, name, fn) bindings[name] = fn end
 		o._props.SendMessage = function(_, name, ...) local fn = bindings[name] assert(fn, "no handler for " .. name) task.spawn(fn, ...) end
+	elseif class == "Humanoid" then
+		o._props.Health, o._props.MaxHealth = 100, 100
+		o._signals.HealthChanged = newSignal()
+		o._signals.Died = newSignal()
+		o._props.SetStateEnabled = function(self, state, enabled) self._states = self._states or {} self._states[state] = enabled end
+	elseif class == "Tool" then
+		o._signals.Activated = newSignal()
 	elseif class == "RemoteEvent" then
+		o._signals.OnClientEvent = newSignal()
+		o._props.FireAllClients = function(self, ...) MOCK.fired = MOCK.fired or {} table.insert(MOCK.fired, { self.Name, ... }) self._signals.OnClientEvent:Fire(...) end
 		o._signals.OnServerEvent = newSignal()
 		o._props.FireServer = function(self, ...) self._signals.OnServerEvent:Fire(MOCK.localPlayer, ...) end
 	end
@@ -325,6 +352,7 @@ local function newPlayer(id, x, z, local_)
 	p._signals.CharacterAdded = newSignal()
 	local gui = Instance.new("PlayerGui") gui.Parent = p
 	local scripts = Instance.new("PlayerScripts") scripts.Parent = p
+	local backpack = Instance.new("Backpack") backpack.Parent = p
 	rawset(p, "_parent", PlayersService)
 	p._props.LoadCharacter = function(self)
 		local char = Instance.new("Model")
@@ -335,7 +363,6 @@ local function newPlayer(id, x, z, local_)
 		root.Position = pad and pad.Position or vec(self.spawnX or 0, 700, self.spawnZ or 0)
 		root.Parent = char
 		local hum = Instance.new("Humanoid")
-		hum._signals.Died = newSignal()
 		hum.Parent = char
 		self.Character = char
 		self.loads = (self.loads or 0) + 1

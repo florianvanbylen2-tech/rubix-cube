@@ -85,6 +85,7 @@ function Shared.serialize(cfg: any, customBiomes: { any }): string
 		Biomes = cfg.Biomes,
 		Materials = { Blocks = cfg.Materials.Blocks, Variants = cfg.Materials.Variants, Custom = cfg.Materials.Custom, Colors = colors },
 		Mobs = cfg.Mobs,
+		SpawnHub = cfg.SpawnHub,
 		Spawn = cfg.Spawn,
 		CustomBiomes = customBiomes,
 	}
@@ -99,7 +100,7 @@ function Shared.apply(cfg: any, json: string): { any }
 	do
 		cfg[k] = data[k]
 	end
-	for _, k in { "Streaming", "Client", "Biomes", "Mobs", "Spawn" } do
+	for _, k in { "Streaming", "Client", "Biomes", "Mobs", "Spawn", "SpawnHub" } do
 		if data[k] ~= nil then
 			cfg[k] = data[k]
 		end

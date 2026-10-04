@@ -104,7 +104,8 @@ Shrine. `TerrainGenerator.GetThingNames()` lists them all.
 | `Client.Workers/SliceMs/WriteBudgetMs` | `2`, `4`, `2` | per-client workers, ms of work per frame per worker, ms of Terrain writes per frame |
 | `Placement.Print`, `MaxPrintsPerSecond` | `true`, `40` | the placeholder printing |
 | `Spawn.AutoSpawn`, `ReadyRadiusChunks` | `true`, `2` | hold characters until their client is ready; size of the locked spawn area |
-| `Mobs.Pig` | `true` | the wandering pig at the spawn point |
+| `SpawnHub.*` | enabled | the spawn hall / safe zone / King Jeffry's lightning, see below |
+| `Mobs.Pig` | `true` | Jeffry, the pig |
 
 ### Where things spawn
 
@@ -197,12 +198,32 @@ TerrainGenerator.GetSpawnPoint()  GetBiomeNames()  GetThingNames()  IsChunkLoade
 `GetBiomeAt` needs no loaded terrain and is exact (it runs Minecraft's biome lookup, including the fuzzy zoom used for
 block-level queries). The first call builds a query generator (~0.2 s).
 
-## The pig
+## The spawn hall, safe zone and King Jeffry
 
-One pig wanders around the spawn point. It is a client-side mob: every client animates the same pig, because its walk is
-a pure function of the world seed and the server clock (no network traffic, nothing for the server to simulate), and it
-follows the client's own terrain with a downward raycast. It hides while the terrain under it is not loaded and never
-walks into water. Turn it off with `Config.Mobs.Pig = false`.
+Everybody spawns in a stone hall (about 56 × 56 studs: four gates, corner towers, a red carpet, pillars, lamps and a
+throne) built at the spawn point. The server builds it from ordinary Parts (`Workspace.SpawnHub`), on level ground
+(the spawn search requires it), with a deep foundation so it never floats. It is a **safe zone**: its footprint plus
+`SpawnHub.SafeMargin` studs, up to three wall heights up.
+
+* Everyone inside gets an invisible `ForceField`, cannot die, and has the attribute `InSafeZone = true` (for your UI).
+  `TerrainGenerator.IsInSafeZone(playerOrPosition)` asks the same.
+* **King Jeffry** — the pig — lives in the hall, crowned and name-tagged, wandering on its floor. Anyone who attacks
+  somebody inside it is struck by his lightning: a jagged bolt from the sky, `Strike.Damage` (40; a protected attacker
+  keeps at least 1 HP), knockback, a short stun and a decree above their head ("King Jeffry strikes down X!").
+  Jeffry turns to look at the culprit. One strike per attacker per `Strike.Cooldown` seconds.
+* Roblox has no built-in combat, so attacks are detected three ways:
+  1. `TerrainGenerator.ReportAttack(attacker, victim)` — call it from your weapon scripts; it returns `true` when the
+     victim is in the safe zone (skip your own damage then).
+  2. Health lost inside the zone is **undone**; if the humanoid carries the classic `creator` ObjectValue tag, that
+     player is the attacker.
+  3. A player activates a `Tool` within `Strike.AttackRange` studs of somebody inside the zone (melee swings).
+* Configure everything in `Config.SpawnHub` (`Enabled`, `Size`, `WallHeight`, `SafeMargin`, `KingName`, `Strike`).
+  `Mobs.Pig = false` removes Jeffry himself (lightning still strikes). With `SpawnHub.Enabled = false` the pig is a
+  plain wanderer near the spawn point again.
+
+Jeffry is a client-side mob: every client animates the same pig, because his walk is a pure function of the world seed
+and the server clock (no network traffic, nothing for the server to simulate). The lightning, the hall and the safe zone
+are server-side, so everyone sees them.
 
 ## Multiplayer streaming
 
@@ -228,9 +249,9 @@ src/TerrainGenerator/
   init.luau                  public API (queries, registration, locks, Start)
   Config.luau  Placement.luau                       settings · the placeThing / removeThings hook
   ClientRunner.client.luau   installed into StarterPlayerScripts by the server (template, disabled)
-  Runtime/                   Server.luau (publishing, players, spawn, locks, things) · Client.luau (terrain, locks,
+  Runtime/                   Server.luau (publishing, players, spawn, locks, things) · SpawnHub.luau (hall, safe zone, lightning) · Client.luau (terrain, locks,
                              ready handshake, pig) · Shared.luau (what is published, option builders)
-  Mobs/Pig.luau
+  Mobs/Pig.luau               the wandering pig (King Jeffry in the hall)
   Core/                      Int64 (hi/lo pairs), Xoroshiro128++, java.util.Random, MD5, SHA-256
   Noise/                     ImprovedNoise, PerlinNoise, NormalNoise, BlendedNoise, Simplex(+Perlin)
   Density/Compiler.luau      vanilla density-function graph -> Luau closures (cell interpolation, flat caches, …)

@@ -43,11 +43,26 @@ function Client.start(env: any): any
 	ctl.spawnPoint = spawnGround
 
 	local pig: any = nil
+	local hubCenter = state:GetAttribute("Hub") :: Vector3?
 	local function startPig()
 		if cfg.Mobs.Pig and not pig then
 			local seedHigh, seedLow = RandomState.seedFrom(cfg.Seed)
-			pig = Pig.start({ seed = (seedLow + seedHigh) % 1000003, home = spawnGround + Vector3.new(10, 0, 10) })
+			local seed = (seedLow + seedHigh) % 1000003
+			if hubCenter then
+				-- Jeffry, the king: lives in the spawn hall and walks on its floor
+				pig = Pig.start({ seed = seed, home = hubCenter, ground = hubCenter.Y, radius = 9, name = cfg.SpawnHub.KingName })
+			else
+				pig = Pig.start({ seed = seed, home = spawnGround + Vector3.new(10, 0, 10) })
+			end
 		end
+	end
+	local strikeRemote = state:FindFirstChild("KingStrike") :: RemoteEvent?
+	if strikeRemote then
+		table.insert(connections, strikeRemote.OnClientEvent:Connect(function(position: Vector3)
+			if pig and pig.look then
+				pig.look(position)
+			end
+		end))
 	end
 
 	if cfg.TerrainMode ~= "Client" then
