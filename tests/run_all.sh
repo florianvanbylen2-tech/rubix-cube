@@ -40,6 +40,8 @@ echo "client/server split end to end against mocked Roblox services (locks, Load
 run tests/system.luau --codegen | tail -1
 echo "spawn hall: safe zone, King Jeffry's lightning"
 run tests/hub.luau --codegen | tail -1
+echo "spawn site: level dry ground for the hall, many seeds"
+run tests/spawn_site.luau --codegen | tail -1
 echo "load governor"
 run tests/governor.luau | tail -1
 echo "all done"

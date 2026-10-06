@@ -3431,6 +3431,8 @@ local function findSpawn(gen: any, flat: boolean): (number, number, number)
 	return bestX, bestZ, bestY
 end
 
+Server.findSpawn = findSpawn -- exposed for tests
+
 -- env: { Config, module, customBiomes, getQueryGenerator, signals = { chunkLoaded, chunkUnloaded, initial, spawn } }
 function Server.start(env: any): any
 	assert(RunService:IsServer(), "TerrainGenerator server runtime must run on the server")
